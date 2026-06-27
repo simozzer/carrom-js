@@ -46,6 +46,9 @@ const KIND_RANK = { pocket: 0, wall: 1, pair: 2 };
 // defaults to the full safety cap (run to rest).
 export function runEngine(layout, shot, opts = {}) {
   const cap = opts.maxEvents ?? MAX_EVENTS;
+  // Building a full replay timeline costs a deep body-copy per event. Callers that only
+  // need the final outcome (the AI's look-ahead) pass timeline:false to skip it entirely.
+  const wantTimeline = opts.timeline !== false;
   const bodies = layout.bodies;
   if (shot) {
     const striker = bodies.find((b) => b.id === shot.strikerId);
@@ -56,7 +59,7 @@ export function runEngine(layout, shot, opts = {}) {
   const bounds = walls();
   const pocketList = pockets();
   let t = 0;
-  const timeline = [snap(bodies, 0, 'start')];
+  const timeline = wantTimeline ? [snap(bodies, 0, 'start')] : [];
   let count = 0;
 
   while (count < cap) {
@@ -99,7 +102,7 @@ export function runEngine(layout, shot, opts = {}) {
     if (!next) {
       advance(bodies, horizon); // coast everything to rest
       t += horizon;
-      timeline.push(snap(bodies, t, 'end'));
+      if (wantTimeline) timeline.push(snap(bodies, t, 'end'));
       break;
     }
 
@@ -117,7 +120,7 @@ export function runEngine(layout, shot, opts = {}) {
       resolvePair(bodies[next.i], bodies[next.j], PUCK_RESTITUTION);
     }
 
-    timeline.push(snap(bodies, t, next.kind));
+    if (wantTimeline) timeline.push(snap(bodies, t, next.kind));
     count += 1;
   }
 

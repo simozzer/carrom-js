@@ -1,16 +1,18 @@
 // ai.js — the computer opponent.
 //
 // candidateShots: ghost-ball aims (strike a target on the line through it from a pocket)
-//   for every own man × pocket, ranked by geometric quality.
+//   for every own man × pocket, ranked by geometric quality. Includes single-cushion BANK
+//   shots off the far edge, so men sitting behind the striker (no legal forward direct line)
+//   can still be potted by rebounding back into them.
 // planShot: the best candidate by geometry alone (cheap; used as a fallback).
 // chooseShot: simulation-scored selection — run a bounded look-ahead on the top
 //   candidates and pick the outcome that pots without scratching. This is what makes it
 //   play accurately. Bounded (candidate count + look-ahead depth) to stay snappy.
 // jitterShot: random ±10% on angle or speed (kept for an optional "imperfect" mode).
 
-import { pockets, PUCK, STRIKER, FRICTION_MU, GRAVITY } from './board.js';
+import { pockets, PUCK, STRIKER, FRICTION_MU, GRAVITY, BOARD, walls } from './board.js';
 import { simulate } from './simulate.js';
-import { turnColor, oppColor, baselineY, strikerXLimit, shotBodies } from './game.js';
+import { turnColor, oppColor, baselineY, strikerXLimit, shotBodies, clampForwardAngle } from './game.js';
 import * as v from './vec2.js';
 
 const DECEL = FRICTION_MU * GRAVITY;
@@ -54,7 +56,69 @@ function candidateShots(game) {
       out.push({ strikerPos: S, angle: Math.atan2(sc.y, sc.x), speed, geom: align - 0.3 * pathLen });
     }
   }
-  out.sort((a, b) => b.geom - a.geom);
+  const all = out.concat(reboundCandidates(game));
+  all.sort((a, b) => b.geom - a.geom);
+  return all;
+}
+
+// Single-cushion bank shots off the FAR edge: fire forward, rebound off the opposite cushion,
+// and come back to the ghost-ball point. This is what lets the AI pot men sitting behind it
+// (near its own baseline), where no legal forward direct line exists.
+//
+// Geometry: within each straight leg friction only changes speed, not direction, so the path
+// shape is friction-independent — only the cushion restitution e bends it (the perpendicular
+// velocity flips and is scaled by e). For a horizontal far cushion at the striker-centre line
+// Yw, leg 1 has slope m1 = dy/dx, and requiring the post-bounce leg to pass through the ghost
+// point C = (cx, cy) gives, after folding the bounce in:
+//     m1 = ((Yw - y0) + (Yw - cy)/e) / (cx - s)
+// for a striker at (s, y0). We sample a few s along the baseline and keep the geometrically
+// valid ones (bounce actually lands on the far cushion, return leg pushes T toward the pocket).
+function reboundCandidates(game) {
+  const color = turnColor(game);
+  const y0 = baselineY(color);
+  const lim = strikerXLimit();
+  const into = -Math.sign(y0); // forward direction (+1 white, -1 black)
+  const rS = STRIKER.radius;
+  const rT = PUCK.radius;
+  const e = BOARD.cushionRestitution;
+  const w = walls();
+  const Yw = into * (BOARD.size / 2 - rS); // far cushion: striker-centre y at the bounce
+  const targets = game.pieces.filter((p) => p.color === color);
+  const sSamples = [-lim, -lim / 2, 0, lim / 2, lim];
+
+  const out = [];
+  for (const T of targets) {
+    for (const pk of pockets()) {
+      const toPocket = v.sub(pk.center, T.pos);
+      const dPocket = v.len(toPocket);
+      if (dPocket < 1e-6) continue;
+      const dir = v.scale(toPocket, 1 / dPocket); // direction T must travel to the pocket
+      const C = v.sub(T.pos, v.scale(dir, rS + rT)); // ghost-ball striker-centre at contact
+      if ((Yw - C.y) * into <= 1e-4) continue; // C must sit short of the far cushion to bank back
+
+      for (const s of sSamples) {
+        const denom = C.x - s;
+        if (Math.abs(denom) < 1e-4) continue;
+        const m1 = ((Yw - y0) + (Yw - C.y) / e) / denom; // leg-1 slope dy/dx
+        if (Math.abs(m1) < 1e-6) continue;
+        const d1 = v.normalize({ x: into / m1, y: into }); // leg-1 dir, forward (dy sign = into)
+        const xw = s + (Yw - y0) / m1; // bounce x on the far cushion
+        if (xw < w.minX + rS || xw > w.maxX - rS) continue; // must hit the far cushion, not a side
+
+        const d2 = v.normalize({ x: d1.x, y: -e * d1.y }); // post-bounce direction
+        const align = v.dot(d2, dir); // approach should push T toward the pocket
+        if (align <= 0) continue;
+
+        const leg1 = Math.hypot(xw - s, Yw - y0);
+        const leg2 = Math.hypot(C.x - xw, C.y - Yw);
+        const pathLen = leg1 + leg2 + dPocket;
+        // the cushion bleeds energy, so banks want near-max power; the grid samples around it
+        const speed = Math.max(4.0, Math.min(6.0, Math.sqrt(2 * DECEL * pathLen) * 2.4));
+        // bank penalty (-0.6) keeps direct shots preferred when both are available
+        out.push({ strikerPos: v.vec(s, y0), angle: Math.atan2(d1.y, d1.x), speed, geom: align - 0.3 * pathLen - 0.6 });
+      }
+    }
+  }
   return out;
 }
 
@@ -65,7 +129,8 @@ export function planShot(game) {
   const y0 = baselineY(color);
   const targets = game.pieces.filter((p) => p.color === color);
   const tgt = targets[0] ? targets[0].pos : v.vec(0, 0);
-  return { strikerPos: v.vec(0, y0), angle: Math.atan2(tgt.y - y0, tgt.x), speed: 3.5 };
+  const angle = clampForwardAngle(color, Math.atan2(tgt.y - y0, tgt.x)); // never fire backward
+  return { strikerPos: v.vec(0, y0), angle, speed: 3.5 };
 }
 
 // Score a simulated shot result from `color`'s perspective.
@@ -84,27 +149,77 @@ function scoreResult(res, byId, color) {
   return own * 100 + (queen ? 70 : 0) - opp * 60 - (foul ? 500 : 0);
 }
 
-// Simulation-scored shot: try the top candidates (each at its planned power and a softer
-// variant), simulate a bounded look-ahead, and keep the best outcome. opts.maxEvents caps
-// the look-ahead depth (snappy); opts.maxCandidates caps how many lines are evaluated.
-export function chooseShot(game, { maxCandidates = 6, maxEvents } = {}) {
+// Simulate one shot to rest and score the outcome from `color`'s perspective.
+function simScore(game, color, strikerPos, angle, speed, maxEvents) {
+  const bodies = shotBodies(game, strikerPos);
+  const res = simulate({ bodies }, { strikerId: 'striker', angle, speed }, { maxEvents, timeline: false });
+  const byId = new Map(bodies.map((b) => [b.id, b]));
+  return scoreResult(res, byId, color);
+}
+
+// Simulation-scored shot: take the top candidate lines, and around each one sample a small
+// grid of power scales × angle nudges, simulate every variant to rest, and keep the best
+// outcome. The grid matters because the ghost-ball geometry is only approximate — sampling
+// nearby power/angle finds the variant that actually pots cleanly without scratching.
+//
+// Skipping the replay timeline (timeline:false) makes each simulation cheap, so the search
+// runs deep (full settle by default) and wide. Knobs:
+//   maxCandidates — how many ghost-ball lines to evaluate (breadth)
+//   maxEvents     — collision cap per simulation; omit/undefined = run to rest (depth)
+//   powerScales   — power multipliers tried per candidate
+//   angleOffsets  — angle nudges (radians) tried per candidate
+//   robust        — { anglePct, speedPct, keep? }: re-rank the top `keep` lines by their
+//                   EXPECTED score over the execution-error box (the same ±pct wobble that
+//                   applyError will add), so a line that only pots on a knife-edge — and
+//                   self-pockets when the real shot wobbles — is downranked in favour of one
+//                   that stays safe. Pass the chosen difficulty's pcts here.
+export function chooseShot(
+  game,
+  { maxCandidates = 10, maxEvents, powerScales = [0.8, 1.0, 1.15], angleOffsets = [-0.01, 0, 0.01], robust = null } = {},
+) {
   const color = turnColor(game);
   const base = candidateShots(game).slice(0, maxCandidates);
-  const cands = [];
-  for (const c of base) {
-    cands.push(c);
-    cands.push({ ...c, speed: Math.max(2.0, c.speed * 0.8) }); // softer variant — avoid scratches
-  }
 
-  let best = null;
-  for (const c of cands) {
-    const bodies = shotBodies(game, c.strikerPos);
-    const res = simulate({ bodies }, { strikerId: 'striker', angle: c.angle, speed: c.speed }, { maxEvents });
-    const byId = new Map(bodies.map((b) => [b.id, b]));
-    const score = scoreResult(res, byId, color) + c.geom; // geom breaks ties between equal outcomes
-    if (!best || score > best.score) best = { strikerPos: c.strikerPos, angle: c.angle, speed: c.speed, score };
+  // Pass 1: nominal score of every power × angle variant of every candidate line.
+  const scored = [];
+  for (const c of base) {
+    for (const ps of powerScales) {
+      const speed = Math.max(2.0, Math.min(6.0, c.speed * ps)); // keep within the legal power band
+      for (const ao of angleOffsets) {
+        const angle = clampForwardAngle(color, c.angle + ao);
+        const score = simScore(game, color, c.strikerPos, angle, speed, maxEvents) + c.geom; // geom breaks ties
+        scored.push({ strikerPos: c.strikerPos, angle, speed, score });
+      }
+    }
   }
-  return best ?? planShot(game);
+  if (!scored.length) return planShot(game);
+  scored.sort((a, b) => b.score - a.score);
+
+  // Pass 2 (optional): among the best nominal lines, pick the one whose EXPECTED outcome over
+  // its own ±error box is best. Averaging in the foul-penalised perturbations sinks any line
+  // that self-pockets under a plausible wobble, even if its dead-centre shot pots cleanly.
+  const ap = robust?.anglePct ?? 0;
+  const sp = robust?.speedPct ?? 0;
+  if (!robust || (ap === 0 && sp === 0)) return scored[0];
+
+  const keep = Math.min(robust.keep ?? 8, scored.length);
+  let best = null;
+  for (const cand of scored.slice(0, keep)) {
+    let sum = cand.score; // include the nominal shot...
+    let n = 1;
+    for (const da of [-1, 0, 1]) {
+      for (const ds of [-1, 0, 1]) {
+        if (da === 0 && ds === 0) continue; // ...plus the 8 surrounding error-box samples
+        const angle = clampForwardAngle(color, cand.angle * (1 + da * ap));
+        const speed = Math.max(2.0, Math.min(6.0, cand.speed * (1 + ds * sp)));
+        sum += simScore(game, color, cand.strikerPos, angle, speed, maxEvents);
+        n += 1;
+      }
+    }
+    const expected = sum / n;
+    if (!best || expected > best.expected) best = { ...cand, expected };
+  }
+  return best;
 }
 
 // Execution error applied to a chosen shot: independent random ±anglePct on the angle

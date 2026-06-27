@@ -32,6 +32,27 @@ export const turnColor = (s) => (s.turn === 0 ? WHITE : BLACK);
 export const oppColor = (c) => (c === WHITE ? BLACK : WHITE);
 export const baselineY = (color) => (color === WHITE ? -BASELINE_Y : BASELINE_Y);
 export const strikerHome = (color) => ({ x: 0, y: baselineY(color) });
+
+// "Play forward" rule: a stroke must drive the striker away from the player's own baseline
+// (into the board) — never sideways (parallel to the baseline) or backward. Forward is +y
+// for White (baseline at -y) and -y for Black.
+export const FORWARD_MIN_DEG = 2; // minimum forward lean — anything flatter counts as sideways
+const FORWARD_MIN_SIN = Math.sin((FORWARD_MIN_DEG * Math.PI) / 180);
+export const forwardSign = (color) => (color === WHITE ? 1 : -1);
+
+// Is `angle` (atan2 convention, radians) a legal forward stroke for `color`?
+export function isForwardAngle(color, angle) {
+  return Math.sin(angle) * forwardSign(color) >= FORWARD_MIN_SIN - 1e-9;
+}
+
+// Nearest legal forward angle to `angle`: an already-forward aim is returned unchanged; a
+// sideways/backward aim is clamped to the forward limit on the same left/right side.
+export function clampForwardAngle(color, angle) {
+  if (isForwardAngle(color, angle)) return angle;
+  const yc = forwardSign(color) * FORWARD_MIN_SIN;
+  const xc = (Math.cos(angle) >= 0 ? 1 : -1) * Math.cos((FORWARD_MIN_DEG * Math.PI) / 180);
+  return Math.atan2(yc, xc);
+}
 const cap = (c) => c[0].toUpperCase() + c.slice(1);
 const radiusOf = (color) => (color === 'queen' ? QUEEN.radius : PUCK.radius);
 

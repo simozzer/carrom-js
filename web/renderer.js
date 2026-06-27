@@ -1,13 +1,14 @@
 // renderer.js — 2-player Carrom: board, turn flow, aiming, and timeline replay.
 // Serve from the PROJECT ROOT (npm run serve) and open /web/ — file:// blocks ES imports.
 //
-// A turn: drag the striker along the current player's baseline, then press & hold the
-// border to aim and charge, release to flick. Pocket your own men to keep playing; the
-// rules (continuation, fouls, queen cover, win) live in src/game.js.
+// A turn: drag the striker along the current player's baseline, set the power on the
+// vertical slider in the right margin, then drag on the board to aim and release to lock
+// into fine-tune (←/→ nudge the angle, Enter fires). Pocket your own men to keep playing;
+// the rules (continuation, fouls, queen cover, win) live in src/game.js.
 
 import { BOARD, walls, pockets, PUCK, QUEEN, STRIKER } from '../src/board.js';
 import { positionAfter } from '../src/body.js';
-import { newGame, nextBoard, takeShot, shotBodies, turnColor, baselineY, strikerHome, BASE_HALF, BASE_CIRCLE_R, strikerXLimit } from '../src/game.js';
+import { newGame, nextBoard, takeShot, shotBodies, turnColor, baselineY, strikerHome, BASE_HALF, BASE_CIRCLE_R, strikerXLimit, clampForwardAngle } from '../src/game.js';
 import { simulate } from '../src/simulate.js';
 import { chooseShot, applyError } from '../src/ai.js';
 import * as v from '../src/vec2.js';
@@ -16,7 +17,7 @@ const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const PX = canvas.width;
 
-const MARGIN = 70;
+const MARGIN = 35; // wooden frame width around the play square (slim — controls live in it)
 const INNER = PX - 2 * MARGIN;
 const toPx = (m) => MARGIN + (m / BOARD.size + 0.5) * INNER;
 const scalePx = (m) => (m / BOARD.size) * INNER;
@@ -24,9 +25,51 @@ const toWorld = (px) => ((px - MARGIN) / INNER - 0.5) * BOARD.size;
 
 const COLORS = { white: '#f3ead3', black: '#525a63', queen: '#b03030', striker: '#37306b' };
 
-const ARM_DELAY = 200; // ms before charge starts
-const CHARGE_MS = 1500; // ms from zero to full power
-const MAX_SPEED = 6.0; // m/s at full charge
+// On a touch device the slim on-canvas controls are tiny under a finger, so we grow their
+// HIT areas (not their drawn size) by HIT_PAD. `(any-pointer: coarse)` is true whenever a
+// touch pointer exists, so hybrid laptops just get slightly more forgiving targets too.
+const COARSE = typeof window !== 'undefined' && window.matchMedia?.('(any-pointer: coarse)')?.matches;
+const HIT_PAD = COARSE ? 16 : 0; // px (canvas space) of extra slop around touch targets
+
+// Power slider, drawn vertically in the right margin. Bottom = 0, top = MAX_SPEED.
+const SLIDER = { x: PX - MARGIN / 2, top: MARGIN, bottom: PX - MARGIN, w: 12, hitW: 34 };
+const sliderH = () => SLIDER.bottom - SLIDER.top;
+const powerToY = (p) => SLIDER.bottom - (p / MAX_SPEED) * sliderH();
+const yToPower = (py) => Math.max(0, Math.min(1, (SLIDER.bottom - py) / sliderH())) * MAX_SPEED;
+const onSlider = (px, py) =>
+  px >= SLIDER.x - SLIDER.hitW / 2 - HIT_PAD && px <= SLIDER.x + SLIDER.hitW / 2 + HIT_PAD &&
+  py >= SLIDER.top - 12 - HIT_PAD && py <= SLIDER.bottom + 12 + HIT_PAD;
+
+// Fine-tune controls, drawn as a row in the bottom margin (same on-canvas "control area" as
+// the slider). Only live while a shot is locked for fine-tuning. The angle buttons hold-to-
+// repeat via the leftHeld/rightHeld flags the arrow keys also drive.
+const FT = { y: PX - 31, h: 26, gap: 8, x0: MARGIN + 6, x1: SLIDER.x - SLIDER.hitW / 2 - 8 };
+const FT_BUTTONS = [
+  { id: 'left', label: '◀ angle', accent: '#8a8a8a' },
+  { id: 'fire', label: 'Fire', accent: '#2e8b57' },
+  { id: 'cancel', label: 'Cancel', accent: '#c0392b' },
+  { id: 'right', label: 'angle ▶', accent: '#8a8a8a' },
+];
+const ftRect = (i) => {
+  const w = (FT.x1 - FT.x0 - (FT_BUTTONS.length - 1) * FT.gap) / FT_BUTTONS.length;
+  return { x: FT.x0 + i * (w + FT.gap), y: FT.y, w, h: FT.h };
+};
+// Which fine-tune button (id) is at pixel (px,py), or null. Live only during fine-tuning.
+// On touch the hit box grows: full pad vertically (the bottom margin is thin), but only half
+// the gap horizontally so neighbouring buttons' touch zones don't overlap.
+function ftButtonAt(px, py) {
+  if (!adjusting) return null;
+  const padX = Math.min(HIT_PAD, FT.gap / 2);
+  for (let i = 0; i < FT_BUTTONS.length; i++) {
+    const r = ftRect(i);
+    if (px >= r.x - padX && px <= r.x + r.w + padX && py >= r.y - HIT_PAD && py <= r.y + r.h + HIT_PAD) return FT_BUTTONS[i].id;
+  }
+  return null;
+}
+let ftPressed = null; // id of the button currently held down
+let ftHover = null; // id of the button under the cursor (hover styling)
+
+const MAX_SPEED = 6.0; // m/s at full power (top of the slider)
 const PLAYBACK_RATE = 0.6; // <1 plays the shot back slower than real time
 // Trajectory-depth menu: how many collisions the preview looks ahead (0 = off).
 const TRAJECTORY = { none: 0, immediate: 2, full: 30 };
@@ -56,7 +99,8 @@ const isAiTurn = () => !game.winner && (selfPlay() || turnColor(game) === 'black
 const RESULT_HOLD_MS = 1000; // hold the shot result before the AI reacts
 const THINK_MS = 350; // brief "thinking" pause before the AI positions the striker
 const AI_SLIDE_MS = 350; // striker slides to its chosen start position
-const AI_HOLD_MS = 400; // show the planned trajectory at the start position before firing
+const AI_CHARGE_MS = 350; // power slider ramps up to the chosen speed
+const AI_PAUSE = 250; // a beat held after each setup step (aim, charge, fire) so it's watchable
 
 // replay state
 let timeline = [];
@@ -104,9 +148,11 @@ function knock(kind) {
 
 // interaction state
 let aiSlide = null; // AI: { fromX, toX, y, startedAt, shot } while sliding the striker into place
-let dragging = false;
-let holding = false;
-let pressAt = 0;
+let dragging = false; // dragging the striker along the baseline
+let holding = false; // dragging on the board to set the aim direction
+let sliderDragging = false; // dragging the power slider
+const DEFAULT_POWER = 1.0; // m/s — the slider resets here at the start of each turn
+let power = DEFAULT_POWER; // m/s — set by the slider, reset every turn
 let aimAngle = 0;
 let aimPoint = null;
 let previewCache = null; // { main: Map<id, pts[]>, fan: pts[][] }
@@ -124,9 +170,9 @@ const ADJUST_STEP = 0.0004; // base radians/frame — a quick tap is a fine nudg
 const ADJUST_ACCEL_MAX = 10; // holding ramps the step up to this multiple of the base
 const ADJUST_RAMP_FRAMES = 75; // frames (~1.25s held) to reach full acceleration
 
-// effective aim used by the preview/gauge: locked while adjusting, live while charging
+// effective aim used by the preview: locked while fine-tuning, live (slider) while aiming
 const aimAngleNow = () => (adjusting ? lockedAngle : aimAngle);
-const aimSpeedNow = (now) => (adjusting ? lockedSpeed : chargeSpeed(now));
+const aimSpeedNow = () => (adjusting ? lockedSpeed : power);
 
 const hud = {
   white: document.getElementById('n-white'),
@@ -151,6 +197,28 @@ function setMessage(text) {
   );
 }
 
+// Stage-aware "what to do now" banner above the board. Mirrors the interaction state so the
+// player always sees the current step of setting up a shot. { step, text } -> banner HTML.
+const howtoEl = document.getElementById('howto');
+function howtoStage() {
+  if (mode === 'gameover') return { step: 'Board over', text: 'Click the board to start the next board or match.' };
+  if (mode === 'animating') return { step: 'In play', text: 'Watching the shot — see where the pieces settle.' };
+  if (isAiTurn() || aiSlide) return { step: 'Opponent', text: 'The computer is lining up its shot — sit tight.' };
+  if (adjusting) return { step: 'Step 4 · Fine-tune', text: 'Nudge the angle with ← → or the on-screen buttons, then Fire (Enter). Esc cancels.' };
+  if (holding) return { step: 'Step 3 · Aim', text: 'Drag to point the shot forward (you can’t fire sideways or backward) — release to lock it in.' };
+  if (dragging) return { step: 'Step 1 · Position', text: 'Slide the striker along your baseline, then release.' };
+  return { step: 'Your shot', text: '① Drag the striker along your baseline · ② set the power on the right-hand slider · ③ drag on the board to aim.' };
+}
+
+let lastHowto = null;
+function updateHowto() {
+  const { step, text } = howtoStage();
+  const html = `<span class="step">${step}</span>${text}`;
+  if (html === lastHowto) return;
+  lastHowto = html;
+  howtoEl.innerHTML = html;
+}
+
 function updateHud() {
   hud.white.textContent = game.pocketed.white;
   hud.black.textContent = game.pocketed.black;
@@ -164,7 +232,7 @@ function updateHud() {
     q === 'board' ? 'Queen: on board' : q === 'pending' ? 'Queen: cover it!' : `Queen: ${q}'s`;
   hud.boardInfo.textContent = game.matchWinner
     ? 'Match over'
-    : `Board ${game.boards + 1} · first to ${game.target}`;
+    : `Board ${game.boards + 1} of ${game.maxBoards} · first to ${game.target} pts`;
   const cont = game.matchWinner ? ' — click for a new match' : game.winner ? ' — click for the next board' : '';
   setMessage(game.message + cont);
 }
@@ -307,17 +375,6 @@ function drawBaselineTrack() {
   ctx.stroke();
 }
 
-// Power oscillates: ramp 0 -> max over CHARGE_MS, then max -> 0, repeating. You time
-// your release for the power you want; release at the trough (speed 0) to cancel and
-// re-plan. Never stuck pinned at max.
-function chargeSpeed(now) {
-  const held = now - pressAt;
-  if (held <= ARM_DELAY) return 0;
-  const cycle = ((held - ARM_DELAY) % (2 * CHARGE_MS)) / CHARGE_MS; // 0..2
-  const frac = cycle <= 1 ? cycle : 2 - cycle; // triangle wave 0..1..0
-  return frac * MAX_SPEED;
-}
-
 // Per-body paths from a look-ahead timeline.
 function pathsFromTimeline(timeline) {
   const paths = new Map();
@@ -385,18 +442,74 @@ function drawPreview(now, angle, speed) {
   ctx.restore();
 }
 
-function drawAim(now) {
-  if (!holding && !adjusting) return;
-  // power gauge (blue once locked for fine-tuning)
-  const frac = aimSpeedNow(now) / MAX_SPEED;
-  const x = toPx(walls().minX);
-  const y = PX - MARGIN / 2 - 6;
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.fillRect(x, y, scalePx(BOARD.size), 12);
+// The power slider: a vertical track in the right margin with a draggable handle.
+// Filled from the bottom up to the current power; blue while fine-tuning, red at full.
+function drawSlider() {
+  const { x, top, bottom, w } = SLIDER;
+  const handleY = powerToY(power);
+  const frac = power / MAX_SPEED;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.fillRect(x - w / 2, top, w, bottom - top); // track
   ctx.fillStyle = adjusting ? '#2e6da4' : frac >= 1 ? '#c0392b' : '#2e8b57';
-  ctx.fillRect(x, y, scalePx(BOARD.size) * frac, 12);
+  ctx.fillRect(x - w / 2, handleY, w, bottom - handleY); // fill up to power
+  ctx.beginPath(); // handle
+  ctx.arc(x, handleY, 9, 0, Math.PI * 2);
+  ctx.fillStyle = sliderDragging ? '#fff' : '#e8e8e8';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('PWR', x, top - 9);
+  ctx.fillText(power.toFixed(1), x, bottom + 17);
+  ctx.restore();
+}
+
+// Trace a rounded-rect path (manual arcTo for broad canvas support).
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// The on-canvas fine-tune control row (bottom margin). Shown while the human is fine-tuning,
+// or forced on (active:true) so the player can watch the computer drive it. Pressed = filled
+// with the button's accent; hovered = lighter; idle = dark translucent. opts override which
+// button reads as pressed/hovered (used to puppet the controls during the AI's turn).
+function drawFineButtons({ active = adjusting, pressed = ftPressed, hover = ftHover } = {}) {
+  if (!active) return;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '600 13px system-ui, sans-serif';
+  for (let i = 0; i < FT_BUTTONS.length; i++) {
+    const b = FT_BUTTONS[i];
+    const r = ftRect(i);
+    const isPressed = pressed === b.id;
+    const isHover = hover === b.id;
+    roundRectPath(r.x, r.y, r.w, r.h, 7);
+    ctx.fillStyle = isPressed ? b.accent : isHover ? 'rgba(20,20,22,0.9)' : 'rgba(20,20,22,0.72)';
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = b.accent;
+    ctx.stroke();
+    ctx.fillStyle = isPressed ? '#fff' : '#eee';
+    ctx.fillText(b.label, r.x + r.w / 2, r.y + r.h / 2 + 1);
+  }
+  ctx.restore();
+}
+
+function drawAim() {
+  if (!holding) return;
   // cursor aim line only while actively dragging the aim
-  if (holding && aimPoint) {
+  if (aimPoint) {
     ctx.save();
     ctx.setLineDash([6, 6]);
     ctx.strokeStyle = 'rgba(0,0,0,0.7)';
@@ -416,6 +529,7 @@ function drawAim(now) {
 // ---- main loop --------------------------------------------------------------
 function endShot() {
   mode = game.winner ? 'gameover' : 'aiming';
+  power = DEFAULT_POWER; // reset the power slider for the new turn
   const home = strikerHome(turnColor(game));
   strikerPos = { x: legalStrikerX(home.x, home.y), y: home.y };
   updateHud();
@@ -444,13 +558,17 @@ function aiMove() {
   if (!isAiTurn() || mode !== 'aiming') return;
   // pick the best shot (with difficulty error), then slide the striker into place
   // before firing so the user can see the start position
-  const shot = applyError(chooseShot(game, { maxEvents: 25 }), difficulty());
+  // Pick the shot, made robust against the same execution-error the difficulty will apply
+  // (so it avoids lines that self-pocket when the shot wobbles), then apply that error.
+  const diff = difficulty();
+  const shot = applyError(chooseShot(game, { robust: diff }), diff);
   const toX = legalStrikerX(shot.strikerPos.x, shot.strikerPos.y);
   aiSlide = { fromX: strikerPos.x, toX, y: shot.strikerPos.y, startedAt: performance.now(), shot };
   previewCache = null; // fresh preview for the AI's chosen line
 }
 
 function frame(now) {
+  updateHowto(); // refresh the stage-aware instruction banner
   drawBoard();
   if (mode === 'animating') {
     const simT = ((now - startedAt) / 1000) * PLAYBACK_RATE;
@@ -474,23 +592,43 @@ function frame(now) {
   } else {
     drawStatic();
     if (mode === 'aiming' && aiSlide) {
-      // animate the AI striker to its start position, hold, then fire
+      // Watch the computer "operate" the controls, staged so each step is clear:
+      //   slide into place → [pause] aim set → charge power → [pause] power set →
+      //   [pause] Fire pressed → flick. Each setup part is held for AI_PAUSE (250ms).
       const t = now - aiSlide.startedAt;
-      if (t < AI_SLIDE_MS) {
-        const k = t / AI_SLIDE_MS;
-        const e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2; // easeInOutQuad
-        strikerPos = { x: aiSlide.fromX + (aiSlide.toX - aiSlide.fromX) * e, y: aiSlide.y };
-        drawStriker();
-      } else if (t < AI_SLIDE_MS + AI_HOLD_MS) {
-        strikerPos = { x: aiSlide.toX, y: aiSlide.y };
-        drawPreview(now, aiSlide.shot.angle, aiSlide.shot.speed); // show the planned line before firing
-        drawStriker();
-      } else {
-        const { shot } = aiSlide;
+      const { shot } = aiSlide;
+      const aimDir = Math.cos(shot.angle) >= 0 ? 'right' : 'left'; // which angle button to flag
+      const tA = AI_SLIDE_MS; // slide done
+      const tB = tA + AI_PAUSE; // aim pause done
+      const tC = tB + AI_CHARGE_MS; // power ramp done
+      const tD = tC + AI_PAUSE; // power pause done
+      const tE = tD + AI_PAUSE; // fire-press pause done → fire
+
+      if (t >= tE) {
         strikerPos = { x: aiSlide.toX, y: aiSlide.y };
         aiSlide = null;
         previewCache = null;
         flick(shot.speed, shot.angle);
+      } else {
+        // striker position: easing in during the slide, parked thereafter
+        if (t < tA) {
+          const k = t / AI_SLIDE_MS;
+          const e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2; // easeInOutQuad
+          strikerPos = { x: aiSlide.fromX + (aiSlide.toX - aiSlide.fromX) * e, y: aiSlide.y };
+        } else {
+          strikerPos = { x: aiSlide.toX, y: aiSlide.y };
+        }
+        // power: empty until charging, ease up during the charge, then hold at the chosen speed
+        if (t < tB) power = 0;
+        else if (t < tC) power = (1 - (1 - Math.min(1, (t - tB) / AI_CHARGE_MS)) ** 3) * shot.speed;
+        else power = shot.speed;
+        // buttons: angle pressed while aiming, Fire pressed during the final beat
+        const pressed = t < tB ? aimDir : t >= tD ? 'fire' : null;
+
+        if (t >= tA) drawPreview(now, shot.angle, shot.speed); // planned line, once positioned
+        drawStriker();
+        drawSlider();
+        drawFineButtons({ active: true, pressed });
       }
     } else if (mode === 'aiming') {
       if (adjusting) {
@@ -502,20 +640,22 @@ function frame(now) {
           if (dir !== holdDir) { holdFrames = 0; holdDir = dir; } // reset on direction change
           holdFrames += 1;
           const accel = Math.min(ADJUST_ACCEL_MAX, 1 + (holdFrames / ADJUST_RAMP_FRAMES) * (ADJUST_ACCEL_MAX - 1));
-          lockedAngle += dir * ADJUST_STEP * accel;
+          lockedAngle = clampForwardAngle(turnColor(game), lockedAngle + dir * ADJUST_STEP * accel); // stay forward
           previewCache = null; // recompute for the nudged angle
         }
       }
-      if (holding || adjusting) drawPreview(now, aimAngleNow(), aimSpeedNow(now));
+      if (holding || adjusting) drawPreview(now, aimAngleNow(), aimSpeedNow());
       if (dragging) drawBaselineTrack();
       drawStriker();
-      drawAim(now);
+      drawAim();
+      if (!isAiTurn()) { drawSlider(); drawFineButtons(); }
     }
   }
   requestAnimationFrame(frame);
 }
 
 function flick(speed, angle) {
+  angle = clampForwardAngle(turnColor(game), angle); // enforce the play-forward rule for every shot
   const res = takeShot(game, strikerPos, angle, speed);
   timeline = res.timeline;
   meta = res.meta;
@@ -530,7 +670,32 @@ function cursorWorld(ev) {
   return v.vec(toWorld(((ev.clientX - rect.left) / rect.width) * PX), toWorld(((ev.clientY - rect.top) / rect.height) * PX));
 }
 
-canvas.addEventListener('mousedown', (ev) => {
+// Cursor in canvas pixel space (0..PX) — for the slider, which lives in the margin.
+function cursorPx(ev) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: ((ev.clientX - rect.left) / rect.width) * PX, y: ((ev.clientY - rect.top) / rect.height) * PX };
+}
+
+// Set power from a slider drag; while fine-tuning, keep the locked shot's power in sync.
+function setPowerFromSlider(py) {
+  power = yToPower(py);
+  if (adjusting) {
+    lockedSpeed = power;
+    previewCache = null;
+  }
+}
+
+// Aim toward the cursor, but enforce the "play forward" rule: a backward/sideways drag is
+// clamped to the forward limit, and the aim dot snaps there so the line shows the real shot.
+function setAimFromCursor(c) {
+  const raw = Math.atan2(c.y - strikerPos.y, c.x - strikerPos.x);
+  aimAngle = clampForwardAngle(turnColor(game), raw);
+  const dist = v.len(v.sub(c, strikerPos));
+  aimPoint = { x: strikerPos.x + Math.cos(aimAngle) * dist, y: strikerPos.y + Math.sin(aimAngle) * dist };
+}
+
+canvas.addEventListener('pointerdown', (ev) => {
+  if (ev.pointerType !== 'mouse') ev.preventDefault(); // touch/pen: don't also fire a mouse event
   if (mode === 'gameover') {
     if (game.matchWinner) game = newGame(); // new match
     else nextBoard(game); // next board of the match
@@ -539,19 +704,44 @@ canvas.addEventListener('mousedown', (ev) => {
   }
   if (mode !== 'aiming') return;
   if (isAiTurn()) return; // computer's turn — ignore human input
+  const px = cursorPx(ev);
+  if (onSlider(px.x, px.y)) {
+    // adjust power; this does NOT abandon a pending fine-tune (tweak power, then fire)
+    sliderDragging = true;
+    setPowerFromSlider(px.y);
+    return;
+  }
+  // fine-tune buttons live in the bottom margin while adjusting — check before re-aiming so
+  // pressing one doesn't abandon the fine-tune. Angle buttons hold-to-repeat (leftHeld/right
+  // Held); Fire/Cancel act on release (handled in mouseup).
+  const ftId = ftButtonAt(px.x, px.y);
+  if (ftId) {
+    ftPressed = ftId;
+    if (ftId === 'left') leftHeld = true;
+    else if (ftId === 'right') rightHeld = true;
+    return;
+  }
   const c = cursorWorld(ev);
   adjusting = false; // starting a new aim abandons any pending fine-tune
   if (v.len(v.sub(c, strikerPos)) <= STRIKER.radius) {
     dragging = true;
     return;
   }
-  aimPoint = c;
-  aimAngle = Math.atan2(c.y - strikerPos.y, c.x - strikerPos.x);
-  pressAt = performance.now();
+  setAimFromCursor(c);
   holding = true;
 });
 
-window.addEventListener('mousemove', (ev) => {
+window.addEventListener('pointermove', (ev) => {
+  const px = cursorPx(ev);
+  // hover feedback for the on-canvas controls (pointer cursor over a button or the slider)
+  ftHover = ftButtonAt(px.x, px.y);
+  const overSlider = mode === 'aiming' && !isAiTurn() && onSlider(px.x, px.y);
+  canvas.style.cursor = ftHover || overSlider ? 'pointer' : 'default';
+
+  if (sliderDragging) {
+    setPowerFromSlider(px.y);
+    return;
+  }
   const c = cursorWorld(ev);
   if (dragging) {
     const y = baselineY(turnColor(game));
@@ -559,47 +749,78 @@ window.addEventListener('mousemove', (ev) => {
     return;
   }
   if (holding) {
-    // swing the aim while charging — the preview/fan recompute for the new direction
-    aimPoint = c;
-    aimAngle = Math.atan2(c.y - strikerPos.y, c.x - strikerPos.x);
+    // swing the aim while dragging — the preview/fan recompute for the new (forward) direction
+    setAimFromCursor(c);
   }
 });
 
-window.addEventListener('mouseup', () => {
+window.addEventListener('pointerup', (ev) => {
+  if (ftPressed) {
+    const id = ftPressed;
+    ftPressed = null;
+    leftHeld = rightHeld = false; // stop any angle sweep
+    // Fire/Cancel only act if released over the same button (drag off to abort the press)
+    if (id === 'fire' || id === 'cancel') {
+      const px = cursorPx(ev);
+      if (ftButtonAt(px.x, px.y) === id) (id === 'fire' ? fireShot : cancelShot)();
+    }
+    return;
+  }
+  if (sliderDragging) {
+    sliderDragging = false;
+    return;
+  }
   if (dragging) {
     dragging = false;
     return;
   }
   if (!holding) return;
   holding = false;
-  const speed = chargeSpeed(performance.now());
   aimPoint = null;
-  if (speed > 0) {
-    // lock the trajectory and enter fine-tune; fire on Enter
+  if (power > 0) {
+    // lock the trajectory and enter fine-tune; fire on Enter (power stays on the slider)
     adjusting = true;
     lockedAngle = aimAngle;
-    lockedSpeed = speed;
+    lockedSpeed = power;
     previewCache = null;
-    hud.msg.textContent = 'Fine-tune: ← → adjust angle · Enter to fire · Esc to cancel';
+    hud.msg.textContent = 'Fine-tune: ← → angle · slider for power · Enter to fire · Esc to cancel';
   }
 });
+
+// A cancelled pointer (touch interrupted by a call, gesture, etc.) must not leave a drag or
+// a held angle-nudge stuck on — drop all in-progress interaction state.
+window.addEventListener('pointercancel', () => {
+  sliderDragging = false;
+  dragging = false;
+  holding = false;
+  aimPoint = null;
+  ftPressed = null;
+  ftHover = null;
+  leftHeld = rightHeld = false;
+});
+
+// Fire / cancel the locked-in shot — shared by the keyboard (Enter/Esc) and the on-screen
+// fine-tune buttons. Both end the fine-tune phase and clear any held nudge.
+function fireShot() {
+  if (!adjusting) return;
+  adjusting = false;
+  leftHeld = rightHeld = false;
+  flick(lockedSpeed, lockedAngle);
+}
+function cancelShot() {
+  if (!adjusting) return;
+  adjusting = false;
+  leftHeld = rightHeld = false;
+  updateHud();
+}
 
 // Fine-tune controls: arrows nudge the angle (hold for continuous), Enter fires, Esc cancels.
 window.addEventListener('keydown', (ev) => {
   if (!adjusting) return;
   if (ev.key === 'ArrowLeft') { leftHeld = true; ev.preventDefault(); }
   else if (ev.key === 'ArrowRight') { rightHeld = true; ev.preventDefault(); }
-  else if (ev.key === 'Enter') {
-    ev.preventDefault();
-    adjusting = false;
-    leftHeld = rightHeld = false;
-    flick(lockedSpeed, lockedAngle);
-  } else if (ev.key === 'Escape') {
-    ev.preventDefault();
-    adjusting = false;
-    leftHeld = rightHeld = false;
-    updateHud();
-  }
+  else if (ev.key === 'Enter') { ev.preventDefault(); fireShot(); }
+  else if (ev.key === 'Escape') { ev.preventDefault(); cancelShot(); }
 });
 
 window.addEventListener('keyup', (ev) => {

@@ -5,40 +5,83 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Carrom-JS</title>
     <style>
+      *, *::before, *::after { box-sizing: border-box; }
       :root { --white-accent: #f0d27a; --black-accent: #6fa8dc; }
       body { margin: 0; background: #2b2b2b; color: #eee; font: 14px system-ui, sans-serif;
-             min-height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 10px; padding-top: 16px; }
-      #hud { width: 600px; display: flex; align-items: center; justify-content: space-between; }
+             min-height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 10px;
+             padding: 16px 8px 0; overscroll-behavior-y: none; }
+      #hud { width: min(600px, 100%); display: flex; align-items: center; justify-content: space-between; }
       .score { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 8px; background: #3a3a3a; }
       .score { transition: outline-color .2s, background .2s; }
+      .score .unit { display: inline-flex; align-items: baseline; gap: 4px; }
+      .score .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; opacity: .55; }
+      .score .match { font-size: 17px; font-weight: 700; }
+      .score .coins { font-size: 13px; opacity: .8; }
+      .score .sep { opacity: .35; }
       body.turn-white #s-white { outline: 2px solid var(--white-accent); background: #463f28; }
       body.turn-black #s-black { outline: 2px solid var(--black-accent); background: #28323f; }
       .dot { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #000; }
       .dot.white { background: #f3ead3; } .dot.black { background: #525a63; }
       #queen { padding: 6px 12px; border-radius: 8px; background: #3a3a3a; }
-      #msg { width: 600px; min-height: 20px; text-align: center; color: #f0c419; font-weight: 600; transition: color .2s; }
+      /* stage-aware "what to do now" banner above the board */
+      #howto { width: min(600px, 100%); padding: 9px 14px; border-radius: 8px;
+               background: #333; border-left: 4px solid #f0c419; color: #ddd; font-size: 13px;
+               line-height: 1.4; min-height: 20px; transition: border-color .2s; }
+      body.turn-white #howto { border-left-color: var(--white-accent); }
+      body.turn-black #howto { border-left-color: var(--black-accent); }
+      #howto .step { font-weight: 700; color: #f0c419; margin-right: 6px; }
+      body.turn-white #howto .step { color: var(--white-accent); }
+      body.turn-black #howto .step { color: var(--black-accent); }
+      #msg { width: min(600px, 100%); min-height: 20px; text-align: center; color: #f0c419; font-weight: 600; transition: color .2s; }
       body.turn-white #msg { color: var(--white-accent); }
       body.turn-black #msg { color: var(--black-accent); font-style: italic; }
-      canvas { background: #d8b074; box-shadow: 0 0 30px #000; transition: box-shadow .25s; }
+      /* canvas keeps its 600px internal resolution but scales down to fit the screen; the
+         cursor math reads getBoundingClientRect so scaled coords stay correct. touch-action
+         none stops a drag-to-aim from scrolling/zooming the page on mobile. The square board
+         is also capped by viewport height (minus room for the HUD/banner/message) so it fits
+         landscape phones without scrolling. */
+      canvas { width: min(600px, 100%, calc(100vh - 150px)); /* fallback for older browsers */
+               width: min(600px, 100%, calc(100svh - 150px)); height: auto; background: #d8b074;
+               box-shadow: 0 0 30px #000; transition: box-shadow .25s;
+               touch-action: none; user-select: none; -webkit-user-select: none; }
       body.turn-white canvas { box-shadow: 0 0 6px #000, 0 0 26px var(--white-accent); }
       body.turn-black canvas { box-shadow: 0 0 6px #000, 0 0 26px var(--black-accent); }
-      #rules { width: 600px; background: #333; border-radius: 8px; margin-bottom: 24px; }
+      #rules { width: min(600px, 100%); background: #333; border-radius: 8px; margin-bottom: 24px; }
       #rules summary { cursor: pointer; padding: 10px 14px; font-weight: 600; color: #f0c419; user-select: none; }
       .rules-body { padding: 0 16px 12px; font-size: 13px; line-height: 1.5; color: #ddd; }
       .rules-body h3 { margin: 14px 0 4px; font-size: 13px; color: var(--white-accent); }
       .rules-body ul { margin: 4px 0; padding-left: 18px; }
       .rules-body li { margin: 3px 0; }
+      /* tighten the HUD on phone-width screens so the score chips don't overflow */
+      @media (max-width: 480px) {
+        body { font-size: 13px; }
+        .score { padding: 5px 8px; gap: 6px; }
+        .score .match { font-size: 15px; }
+        .score .lbl { font-size: 9px; }
+        #queen { padding: 5px 8px; }
+      }
     </style>
   </head>
   <body>
     <div id="hud">
-      <div class="score" id="s-white"><span class="dot white"></span><b id="p-white">0</b> pts · <span id="n-white">0</span>/9</div>
+      <div class="score" id="s-white">
+        <span class="dot white"></span>
+        <span class="unit"><span class="lbl">Match</span><b id="p-white" class="match">0</b><span class="lbl">pts</span></span>
+        <span class="sep">·</span>
+        <span class="unit"><span class="lbl">coins</span><span class="coins"><span id="n-white">0</span>/9</span></span>
+      </div>
       <div style="text-align:center">
         <div id="queen">Queen: on board</div>
-        <div id="board-info" style="font-size:11px;opacity:.7">Board 1 · first to 25</div>
+        <div id="board-info" style="font-size:11px;opacity:.7">Board 1 of 8 · first to 25 pts</div>
       </div>
-      <div class="score" id="s-black"><span class="dot black"></span><b id="p-black">0</b> pts · <span id="n-black">0</span>/9</div>
+      <div class="score" id="s-black">
+        <span class="dot black"></span>
+        <span class="unit"><span class="lbl">Match</span><b id="p-black" class="match">0</b><span class="lbl">pts</span></span>
+        <span class="sep">·</span>
+        <span class="unit"><span class="lbl">coins</span><span class="coins"><span id="n-black">0</span>/9</span></span>
+      </div>
     </div>
+    <div id="howto"><span class="step">Your shot</span>Drag the striker, set the power, then aim.</div>
     <canvas id="board" width="600" height="600"></canvas>
     <div id="msg">White to break</div>
     <div style="opacity:.85;font-size:13px;margin-top:2px">
@@ -64,7 +107,6 @@
       &nbsp;&nbsp;
       <label><input type="checkbox" id="sound" checked /> sound</label>
     </div>
-    <div style="opacity:.6;font-size:12px">drag the striker to position · press & hold then drag to aim · power oscillates — release at the strength you want · then ← → to fine-tune the angle, Enter to fire (Esc cancels)</div>
 
     <details id="rules">
       <summary>How to play &amp; rules</summary>
@@ -78,11 +120,14 @@
         <h3>Controls</h3>
         <ul>
           <li><b>Position:</b> drag the striker along your baseline (it can’t overlap a coin).</li>
-          <li><b>Aim &amp; power:</b> press and hold the board, then drag to set the direction.
-            The power gauge oscillates up and down — release at the strength you want
-            (release at zero to cancel).</li>
+          <li><b>Power:</b> drag the vertical slider in the right margin to set the strength
+            (it stays where you leave it between shots).</li>
+          <li><b>Aim:</b> drag on the board from the striker to set the direction, then release.
+            You must play <b>forward</b> (into the board) — sideways or backward shots aren’t allowed.</li>
           <li><b>Fine-tune:</b> after releasing, the shot locks — nudge the angle with
-            <b>← / →</b> (hold to sweep faster), then <b>Enter</b> to fire or <b>Esc</b> to cancel.</li>
+            <b>← / →</b> or the <b>◀ angle / angle ▶</b> buttons that appear in the board's
+            bottom margin (hold to sweep faster), then <b>Fire</b> / <b>Enter</b> to shoot or
+            <b>Cancel</b> / <b>Esc</b>.</li>
           <li><b>Trajectories</b> menu previews where the shot goes (None / first 2 collisions /
             full); <b>Difficulty</b> sets how precisely the computer plays.</li>
         </ul>
