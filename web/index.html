@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Carrom-JS</title>
+    <style>
+      :root { --white-accent: #f0d27a; --black-accent: #6fa8dc; }
+      body { margin: 0; background: #2b2b2b; color: #eee; font: 14px system-ui, sans-serif;
+             min-height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 10px; padding-top: 16px; }
+      #hud { width: 600px; display: flex; align-items: center; justify-content: space-between; }
+      .score { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 8px; background: #3a3a3a; }
+      .score { transition: outline-color .2s, background .2s; }
+      body.turn-white #s-white { outline: 2px solid var(--white-accent); background: #463f28; }
+      body.turn-black #s-black { outline: 2px solid var(--black-accent); background: #28323f; }
+      .dot { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #000; }
+      .dot.white { background: #f3ead3; } .dot.black { background: #525a63; }
+      #queen { padding: 6px 12px; border-radius: 8px; background: #3a3a3a; }
+      #msg { width: 600px; min-height: 20px; text-align: center; color: #f0c419; font-weight: 600; transition: color .2s; }
+      body.turn-white #msg { color: var(--white-accent); }
+      body.turn-black #msg { color: var(--black-accent); font-style: italic; }
+      canvas { background: #d8b074; box-shadow: 0 0 30px #000; transition: box-shadow .25s; }
+      body.turn-white canvas { box-shadow: 0 0 6px #000, 0 0 26px var(--white-accent); }
+      body.turn-black canvas { box-shadow: 0 0 6px #000, 0 0 26px var(--black-accent); }
+      #rules { width: 600px; background: #333; border-radius: 8px; margin-bottom: 24px; }
+      #rules summary { cursor: pointer; padding: 10px 14px; font-weight: 600; color: #f0c419; user-select: none; }
+      .rules-body { padding: 0 16px 12px; font-size: 13px; line-height: 1.5; color: #ddd; }
+      .rules-body h3 { margin: 14px 0 4px; font-size: 13px; color: var(--white-accent); }
+      .rules-body ul { margin: 4px 0; padding-left: 18px; }
+      .rules-body li { margin: 3px 0; }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <div class="score" id="s-white"><span class="dot white"></span><b id="p-white">0</b> pts · <span id="n-white">0</span>/9</div>
+      <div style="text-align:center">
+        <div id="queen">Queen: on board</div>
+        <div id="board-info" style="font-size:11px;opacity:.7">Board 1 · first to 25</div>
+      </div>
+      <div class="score" id="s-black"><span class="dot black"></span><b id="p-black">0</b> pts · <span id="n-black">0</span>/9</div>
+    </div>
+    <canvas id="board" width="600" height="600"></canvas>
+    <div id="msg">White to break</div>
+    <div style="opacity:.85;font-size:13px;margin-top:2px">
+      <label><input type="checkbox" id="selfplay" /> computer vs computer (auto-play)</label>
+      &nbsp;&nbsp;
+      <label>difficulty:
+        <select id="difficulty">
+          <option value="perfect">Perfect (no error)</option>
+          <option value="hard">Hard</option>
+          <option value="medium" selected>Medium</option>
+          <option value="easy">Easy</option>
+          <option value="beginner">Beginner</option>
+        </select>
+      </label>
+      &nbsp;&nbsp;
+      <label>trajectories:
+        <select id="trajectory">
+          <option value="none">None</option>
+          <option value="immediate">Immediate</option>
+          <option value="full" selected>Full</option>
+        </select>
+      </label>
+      &nbsp;&nbsp;
+      <label><input type="checkbox" id="sound" checked /> sound</label>
+    </div>
+    <div style="opacity:.6;font-size:12px">drag the striker to position · press & hold then drag to aim · power oscillates — release at the strength you want · then ← → to fine-tune the angle, Enter to fire (Esc cancels)</div>
+
+    <details id="rules">
+      <summary>How to play &amp; rules</summary>
+      <div class="rules-body">
+        <h3>Aim of the game</h3>
+        <p>You are <b>White</b>, the computer is <b>Black</b> (untick “computer vs computer”
+          to watch it play itself). Flick the striker to pocket all nine of your own
+          carrom men. First to <b>25 points</b>, or the higher score after <b>8 boards</b>,
+          wins the match.</p>
+
+        <h3>Controls</h3>
+        <ul>
+          <li><b>Position:</b> drag the striker along your baseline (it can’t overlap a coin).</li>
+          <li><b>Aim &amp; power:</b> press and hold the board, then drag to set the direction.
+            The power gauge oscillates up and down — release at the strength you want
+            (release at zero to cancel).</li>
+          <li><b>Fine-tune:</b> after releasing, the shot locks — nudge the angle with
+            <b>← / →</b> (hold to sweep faster), then <b>Enter</b> to fire or <b>Esc</b> to cancel.</li>
+          <li><b>Trajectories</b> menu previews where the shot goes (None / first 2 collisions /
+            full); <b>Difficulty</b> sets how precisely the computer plays.</li>
+        </ul>
+
+        <h3>Rules</h3>
+        <ul>
+          <li><b>Keep your turn</b> by pocketing one of your own men; miss and the turn passes.</li>
+          <li><b>The Queen</b> (red) must be <i>covered</i>: pocket one of your own men on the
+            same or next stroke, or she’s returned to the centre. A covered Queen is worth
+            <b>3 points</b>.</li>
+          <li><b>Pocketing the striker is a foul</b> — a potted coin is returned (or owed as a
+            “due” if you have none), and your turn ends. <b>Three fouls in a row</b> costs an
+            extra coin.</li>
+          <li><b>Pocketing an opponent’s coin</b> simply gives it to them.</li>
+          <li><b>Scoring a board:</b> the winner scores 1 point per opponent coin still on the
+            board, plus 3 for a covered Queen.</li>
+        </ul>
+      </div>
+    </details>
+
+    <!-- Serve from the PROJECT ROOT (npm run serve) and open /web/. -->
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

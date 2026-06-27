@@ -1,0 +1,11 @@
+{
+  "name": "carrom-sim",
+  "version": "0.0.1",
+  "description": "Event-driven 2D physics predictor for Carrom — pure ES6, no dependencies.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "serve": "python3 -m http.server 8080"
+  },
+  "license": "MIT"
+}
