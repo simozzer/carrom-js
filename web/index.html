@@ -36,14 +36,17 @@
       body.turn-white #msg { color: var(--white-accent); }
       body.turn-black #msg { color: var(--black-accent); font-style: italic; }
       /* canvas keeps its 600px internal resolution but scales down to fit the screen; the
-         cursor math reads getBoundingClientRect so scaled coords stay correct. touch-action
-         none stops a drag-to-aim from scrolling/zooming the page on mobile. The square board
-         is also capped by viewport height (minus room for the HUD/banner/message) so it fits
-         landscape phones without scrolling. */
+         cursor math reads getBoundingClientRect so scaled coords stay correct. The square
+         board is capped by viewport height (minus room for the HUD/banner/message) so it
+         fits landscape phones without scrolling.
+         touch-action: pinch-zoom lets a two-finger pinch zoom the board on mobile, while a
+         single finger still drags-to-aim without scrolling the page (one finger = play,
+         two fingers = zoom/pan). */
       canvas { width: min(600px, 100%, calc(100vh - 150px)); /* fallback for older browsers */
                width: min(600px, 100%, calc(100svh - 150px)); height: auto; background: #d8b074;
                box-shadow: 0 0 30px #000; transition: box-shadow .25s;
-               touch-action: none; user-select: none; -webkit-user-select: none; }
+               touch-action: pinch-zoom; user-select: none; -webkit-user-select: none;
+               -webkit-touch-callout: none; }
       body.turn-white canvas { box-shadow: 0 0 6px #000, 0 0 26px var(--white-accent); }
       body.turn-black canvas { box-shadow: 0 0 6px #000, 0 0 26px var(--black-accent); }
       #rules { width: min(600px, 100%); background: #333; border-radius: 8px; margin-bottom: 24px; }
