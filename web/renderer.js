@@ -596,18 +596,51 @@ function endShot() {
   }
 }
 
-function aiMove() {
-  if (!isAiTurn() || mode !== 'aiming') return;
-  // pick the best shot (with difficulty error), then slide the striker into place
-  // before firing so the user can see the start position
-  // Pick the shot, made robust against the same execution-error the difficulty will apply
-  // (so it avoids lines that self-pocket when the shot wobbles), then apply that error.
-  const diff = difficulty();
-  // let the AI also consider left/no/right spin; it keeps spin=0 unless a spun line scores better
-  const shot = applyError(chooseShot(game, { robust: diff, ...(diff.search ?? AI_SEARCH) }), diff);
+// The AI's shot search runs in a Web Worker so its think (up to ~0.5s at Deadly) doesn't
+// freeze the UI — the "thinking…" frame keeps animating. Falls back to a synchronous compute
+// if module workers aren't available. The chosen line gets its execution-error wobble applied
+// on the main thread (it's cheap and keeps the worker pure).
+let aiWorker = null; // null = not created, false = unavailable, else the Worker
+let aiReqId = 0;
+let aiPending = null; // { reqId, diff } while a worker search is in flight
+function ensureAiWorker() {
+  if (aiWorker !== null || typeof Worker === 'undefined') return aiWorker;
+  try {
+    aiWorker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
+    aiWorker.onmessage = (e) => onAiShot(e.data);
+    aiWorker.onerror = () => { aiWorker = false; }; // failed to load → sync fallback hereafter
+  } catch {
+    aiWorker = false;
+  }
+  return aiWorker;
+}
+function startAiSlide(shot) {
   const toX = legalStrikerX(shot.strikerPos.x, shot.strikerPos.y);
   aiSlide = { fromX: strikerPos.x, toX, y: shot.strikerPos.y, startedAt: performance.now(), shot };
   previewCache = null; // fresh preview for the AI's chosen line
+}
+function onAiShot({ shot, reqId }) {
+  if (!aiPending || reqId !== aiPending.reqId) return; // stale / superseded request
+  const diff = aiPending.diff;
+  aiPending = null;
+  if (!isAiTurn() || mode !== 'aiming' || aiSlide) return; // the turn moved on while it thought
+  startAiSlide(applyError(shot, diff)); // apply the difficulty's execution error, then animate
+}
+
+function aiMove() {
+  if (!isAiTurn() || mode !== 'aiming') return;
+  const diff = difficulty();
+  // robust = avoid lines that self-pocket under the difficulty's wobble; search may also try
+  // left/no/right spin (it keeps spin=0 unless a spun line scores better).
+  const config = { robust: { anglePct: diff.anglePct, speedPct: diff.speedPct }, ...(diff.search ?? AI_SEARCH) };
+  const w = ensureAiWorker();
+  if (w) {
+    aiReqId += 1;
+    aiPending = { reqId: aiReqId, diff };
+    w.postMessage({ pieces: game.pieces, turn: game.turn, config, reqId: aiReqId });
+  } else {
+    startAiSlide(applyError(chooseShot(game, config), diff)); // synchronous fallback
+  }
 }
 
 function frame(now) {
