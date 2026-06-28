@@ -596,35 +596,50 @@ function endShot() {
   }
 }
 
-// The AI's shot search runs in a Web Worker so its think (up to ~0.5s at Deadly) doesn't
-// freeze the UI — the "thinking…" frame keeps animating. Falls back to a synchronous compute
-// if module workers aren't available. The chosen line gets its execution-error wobble applied
-// on the main thread (it's cheap and keeps the worker pure).
-let aiWorker = null; // null = not created, false = unavailable, else the Worker
+// The AI's shot search runs in a POOL of Web Workers — the candidate list is split across CPU
+// cores (each worker scores its slice and returns its best; the main thread keeps the global
+// max). This keeps the UI smooth (the "thinking…" frame keeps animating) AND uses every core,
+// so a heavy Deadly search finishes in a fraction of the single-thread time. Falls back to a
+// synchronous compute if module workers aren't available. The chosen line gets its
+// execution-error wobble applied on the main thread (cheap, and keeps the workers pure).
+const AI_POOL_SIZE = Math.max(2, Math.min((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4, 8));
+let aiPool = null; // null = not built, false = unavailable, else Worker[]
 let aiReqId = 0;
-let aiPending = null; // { reqId, diff } while a worker search is in flight
-function ensureAiWorker() {
-  if (aiWorker !== null || typeof Worker === 'undefined') return aiWorker;
+let aiPending = null; // { reqId, diff, need, got: [] } while a fan-out search is in flight
+function ensureAiPool() {
+  if (aiPool !== null || typeof Worker === 'undefined') return aiPool;
   try {
-    aiWorker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
-    aiWorker.onmessage = (e) => onAiShot(e.data);
-    aiWorker.onerror = () => { aiWorker = false; }; // failed to load → sync fallback hereafter
+    aiPool = [];
+    for (let i = 0; i < AI_POOL_SIZE; i++) {
+      const w = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
+      w.onmessage = (e) => aiContribute(e.data.shot, e.data.reqId);
+      w.onerror = () => { aiContribute(null, aiPending?.reqId); aiPool = aiPool && aiPool.filter((x) => x !== w); };
+      aiPool.push(w);
+    }
   } catch {
-    aiWorker = false;
+    aiPool = false;
   }
-  return aiWorker;
+  return aiPool;
 }
 function startAiSlide(shot) {
   const toX = legalStrikerX(shot.strikerPos.x, shot.strikerPos.y);
   aiSlide = { fromX: strikerPos.x, toX, y: shot.strikerPos.y, startedAt: performance.now(), shot };
   previewCache = null; // fresh preview for the AI's chosen line
 }
-function onAiShot({ shot, reqId }) {
+// one worker reported its best (or null); once the whole pool is in, merge and fire.
+function aiContribute(shot, reqId) {
   if (!aiPending || reqId !== aiPending.reqId) return; // stale / superseded request
-  const diff = aiPending.diff;
+  if (shot) aiPending.got.push(shot);
+  if (--aiPending.need > 0) return; // wait for the rest of the pool
+  const { got, diff, config } = aiPending;
   aiPending = null;
   if (!isAiTurn() || mode !== 'aiming' || aiSlide) return; // the turn moved on while it thought
-  startAiSlide(applyError(shot, diff)); // apply the difficulty's execution error, then animate
+  let best = null;
+  for (const s of got) if (!best || s.score > best.score) best = s; // global best across slices
+  // If no worker returned a shot (every slice empty, OR the whole pool failed to load), do the
+  // full search synchronously here — chooseShot falls back to planShot only when there really
+  // are no candidates. This avoids playing a weak planShot when module workers are unsupported.
+  startAiSlide(applyError(best ?? chooseShot(game, config), diff));
 }
 
 function aiMove() {
@@ -633,11 +648,13 @@ function aiMove() {
   // robust = avoid lines that self-pocket under the difficulty's wobble; search may also try
   // left/no/right spin (it keeps spin=0 unless a spun line scores better).
   const config = { robust: { anglePct: diff.anglePct, speedPct: diff.speedPct }, ...(diff.search ?? AI_SEARCH) };
-  const w = ensureAiWorker();
-  if (w) {
+  const pool = ensureAiPool();
+  if (pool && pool.length) {
     aiReqId += 1;
-    aiPending = { reqId: aiReqId, diff };
-    w.postMessage({ pieces: game.pieces, turn: game.turn, config, reqId: aiReqId });
+    aiPending = { reqId: aiReqId, diff, config, need: pool.length, got: [] };
+    for (let i = 0; i < pool.length; i++) {
+      pool[i].postMessage({ pieces: game.pieces, turn: game.turn, config: { ...config, slice: { workers: pool.length, index: i } }, reqId: aiReqId });
+    }
   } else {
     startAiSlide(applyError(chooseShot(game, config), diff)); // synchronous fallback
   }

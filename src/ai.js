@@ -176,16 +176,24 @@ function simScore(game, color, strikerPos, angle, speed, maxEvents, spin = 0) {
 //                   applyError will add), so a line that only pots on a knife-edge — and
 //                   self-pockets when the real shot wobbles — is downranked in favour of one
 //                   that stays safe. Pass the chosen difficulty's pcts here.
+//   slice         — { workers, index }: evaluate only candidates where index ≡ candidate#
+//                   (mod workers). Lets a worker pool split the search across CPU cores; each
+//                   returns its best (with `.score`) and the caller keeps the global max.
+//                   Returns null when this slice has no candidates. The returned shot always
+//                   carries a `.score` (nominal, or expected when robust) for that merge.
 export function chooseShot(
   game,
-  { maxCandidates = 10, maxEvents, powerScales = [0.8, 1.0, 1.15], angleOffsets = [-0.01, 0, 0.01], spins = [0], robust = null } = {},
+  { maxCandidates = 10, maxEvents, powerScales = [0.8, 1.0, 1.15], angleOffsets = [-0.01, 0, 0.01], spins = [0], robust = null, slice = null } = {},
 ) {
   const color = turnColor(game);
   const base = candidateShots(game).slice(0, maxCandidates);
+  // a worker pool partitions the candidate list; each worker scores only its share
+  const list = slice ? base.filter((_, i) => i % slice.workers === slice.index) : base;
+  if (slice && list.length === 0) return null; // nothing for this worker to do
 
   // Pass 1: nominal score of every power × angle × spin variant of every candidate line.
   const scored = [];
-  for (const c of base) {
+  for (const c of list) {
     for (const ps of powerScales) {
       const speed = Math.max(2.0, Math.min(6.0, c.speed * ps)); // keep within the legal power band
       for (const ao of angleOffsets) {
@@ -197,7 +205,7 @@ export function chooseShot(
       }
     }
   }
-  if (!scored.length) return planShot(game);
+  if (!scored.length) return slice ? null : planShot(game);
   scored.sort((a, b) => b.score - a.score);
 
   // Pass 2 (optional): among the best nominal lines, pick the one whose EXPECTED outcome over
@@ -222,7 +230,8 @@ export function chooseShot(
       }
     }
     const expected = sum / n;
-    if (!best || expected > best.expected) best = { ...cand, expected };
+    // carry the expected value as `.score` so a worker pool can merge robust results too
+    if (!best || expected > best.score) best = { ...cand, score: expected };
   }
   return best;
 }
