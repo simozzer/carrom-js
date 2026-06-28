@@ -72,13 +72,20 @@ export function detectPair(a, b) {
   const R = a.radius + b.radius;
   const dp = v.sub(a.pos, b.pos);
 
+  const dist = v.len(dp);
+
   // Already touching: an event only if approaching (re-collision guard — a just-resolved
   // pair is separating and must not be re-detected at dt~0).
-  if (v.len(dp) - R <= CONTACT_EPS) {
+  if (dist - R <= CONTACT_EPS) {
     const vn = v.dot(v.sub(a.vel, b.vel), v.normalize(dp));
     return vn < 0 ? TIME_EPS : Infinity;
   }
   if (!a.moving && !b.moving) return Infinity;
+
+  // Broad-phase reject: the centre gap can shrink by at most each body's distance-to-stop
+  // (v²/2a), so if it's wider than both can ever close, contact is impossible — skip the
+  // (expensive) quartic solve. Exact and conservative: never rejects a real collision.
+  if (dist - R > (v.len2(a.vel) + v.len2(b.vel)) / (2 * DECEL)) return Infinity;
 
   const Ta = a.stopTime();
   const Tb = b.stopTime();
