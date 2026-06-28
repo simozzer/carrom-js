@@ -86,14 +86,16 @@ const selfPlay = () => document.getElementById('selfplay')?.checked;
 // Difficulty = how much execution error the AI gets (perfect = none = hardest).
 // The AI's shot search. `search` (passed to chooseShot) is the AI's *brain* — how many
 // lines/power/angle/spin variants it evaluates. anglePct/speedPct are its *hand* — execution
-// error. Deadly = perfect hand AND a much bigger brain (finer aim + more spin options), so it
-// finds far more multi-coin shots. The opening break costs ~2s of thinking at this level.
+// error. Deadly = perfect hand AND a much bigger brain: a dense candidate × power × angle ×
+// spin grid (~3.8k look-aheads) that pots 2+ coins in essentially every position. That's ~5×
+// the compute of the other levels, but the multi-worker pool fans it across CPU cores, so it
+// still lands in a few tenths of a second.
 const AI_SEARCH = { spins: [-0.7, 0, 0.7] }; // standard search for every level
 const DEADLY_SEARCH = {
-  maxCandidates: 12,
-  powerScales: [0.8, 1.0, 1.2],
-  angleOffsets: [-0.015, -0.005, 0.005, 0.015],
-  spins: [-0.7, -0.35, 0, 0.35, 0.7],
+  maxCandidates: 18,
+  powerScales: [0.7, 0.85, 1.0, 1.15, 1.3],
+  angleOffsets: [-0.02, -0.012, -0.004, 0.004, 0.012, 0.02],
+  spins: [-0.8, -0.5, -0.25, 0, 0.25, 0.5, 0.8],
 };
 const DIFFICULTY = {
   deadly: { anglePct: 0, speedPct: 0, search: DEADLY_SEARCH },
