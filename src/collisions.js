@@ -15,11 +15,14 @@ import * as v from './vec2.js';
 const inertiaOf = (b) => 0.5 * b.mass * b.radius * b.radius; // uniform disc
 
 // Resolve a disc/disc collision in place. Mutates a.vel/b.vel (and, if muT>0, a.omega/b.omega).
+// Returns the closing speed along the contact normal (≥0) — the impact "hardness" the engine
+// uses to drive collision-sound volume, so it isn't recomputed there.
 export function resolvePair(a, b, restitution, muT = 0) {
   const n = v.normalize(v.sub(a.pos, b.pos)); // contact normal, b -> a
   const vrel = v.sub(a.vel, b.vel);
   const vn = v.dot(vrel, n);
-  if (vn > 0) return; // already separating — safety
+  if (vn > 0) return 0; // already separating — safety; no impact
+  const closing = -vn; // closing speed along the normal (vn<0 while approaching)
 
   const invA = 1 / a.mass;
   const invB = 1 / b.mass;
@@ -27,7 +30,7 @@ export function resolvePair(a, b, restitution, muT = 0) {
   a.vel = v.add(a.vel, v.scale(n, jn * invA));
   b.vel = v.sub(b.vel, v.scale(n, jn * invB));
 
-  if (muT <= 0) return; // Phase 1 only
+  if (muT <= 0) return closing; // Phase 1 only
 
   // Tangential ("throw") impulse along t = perp(n).
   const t = v.perp(n);
@@ -47,14 +50,17 @@ export function resolvePair(a, b, restitution, muT = 0) {
   // torque from the tangential impulse at each contact point (r = ∓radius·n):
   a.omega += (-a.radius * jt) / Ia;
   b.omega += (-b.radius * jt) / Ib;
+  return closing;
 }
 
 // Reflect the normal velocity component off a wall, scaled by restitution.
 // restThreshold zeroes a tiny rebound so a body settling against a cushion can't
 // micro-bounce forever (Zeno). muT>0 adds cushion "throw": spin <-> tangential velocity.
+// Returns the incoming normal speed (≥0) — the impact "hardness" the engine uses for sound.
 export function resolveWall(body, axis, restitution, restThreshold = 1e-3, muT = 0) {
   const vx = body.vel.x;
   const vy = body.vel.y;
+  const impact = Math.abs(axis === 'x' ? vx : vy); // incoming normal speed
 
   let nvx = vx;
   let nvy = vy;
@@ -67,7 +73,7 @@ export function resolveWall(body, axis, restitution, restThreshold = 1e-3, muT =
   }
   body.vel = { x: nvx, y: nvy };
 
-  if (muT <= 0) return; // Phase 1 only
+  if (muT <= 0) return impact; // Phase 1 only
 
   // Cushion throw. Inward normal n opposes the incoming normal velocity; tangent t = perp(n).
   const I = inertiaOf(body);
@@ -96,4 +102,5 @@ export function resolveWall(body, axis, restitution, restThreshold = 1e-3, muT =
 
   body.vel = { x: body.vel.x + jt * invM * tx, y: body.vel.y + jt * invM * ty };
   body.omega += (-body.radius * jt) / I;
+  return impact;
 }

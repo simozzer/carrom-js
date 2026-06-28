@@ -182,13 +182,12 @@ export function runEngine(layout, shot, opts = {}) {
     advance(bodies, Math.max(0, next.time - t));
     t = next.time;
 
-    // Impact speed (m/s) just before resolving — how "hard" the contact is; drives sound volume.
-    // Only needed for the replay timeline, so skip it on the AI's timeline:false look-aheads.
+    // Impact speed (m/s) of the contact — how "hard" it is; drives sound volume. The resolvers
+    // return it (they compute it anyway), so there's no separate pre-resolution velocity read.
     let intensity = 0;
     if (next.kind === 'wall') {
       const b = bodies[next.i];
-      if (wantTimeline) intensity = Math.abs(next.axis === 'x' ? b.vel.x : b.vel.y); // incoming normal speed
-      resolveWall(b, next.axis, BOARD.cushionRestitution, 1e-3, muWall);
+      intensity = resolveWall(b, next.axis, BOARD.cushionRestitution, 1e-3, muWall);
       recompute(next.i); // only this body's velocity changed
     } else if (next.kind === 'pocket') {
       const b = bodies[next.i];
@@ -197,13 +196,7 @@ export function runEngine(layout, shot, opts = {}) {
       b.pocket = next.pocketIndex;
       clearBody(next.i);
     } else {
-      const a = bodies[next.i];
-      const b = bodies[next.j];
-      if (wantTimeline) {
-        const n = v.normalize(v.sub(a.pos, b.pos));
-        intensity = Math.abs(v.dot(v.sub(a.vel, b.vel), n)); // closing speed along the contact normal
-      }
-      resolvePair(a, b, PUCK_RESTITUTION, muPair);
+      intensity = resolvePair(bodies[next.i], bodies[next.j], PUCK_RESTITUTION, muPair);
       recompute(next.i); // both bodies' velocities changed
       recompute(next.j);
     }
