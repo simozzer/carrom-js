@@ -84,7 +84,19 @@ let strikerPos = strikerHome(turnColor(game));
 const selfPlay = () => document.getElementById('selfplay')?.checked;
 
 // Difficulty = how much execution error the AI gets (perfect = none = hardest).
+// The AI's shot search. `search` (passed to chooseShot) is the AI's *brain* — how many
+// lines/power/angle/spin variants it evaluates. anglePct/speedPct are its *hand* — execution
+// error. Deadly = perfect hand AND a much bigger brain (finer aim + more spin options), so it
+// finds far more multi-coin shots. The opening break costs ~2s of thinking at this level.
+const AI_SEARCH = { spins: [-0.7, 0, 0.7] }; // standard search for every level
+const DEADLY_SEARCH = {
+  maxCandidates: 12,
+  powerScales: [0.8, 1.0, 1.2],
+  angleOffsets: [-0.015, -0.005, 0.005, 0.015],
+  spins: [-0.7, -0.35, 0, 0.35, 0.7],
+};
 const DIFFICULTY = {
+  deadly: { anglePct: 0, speedPct: 0, search: DEADLY_SEARCH },
   perfect: { anglePct: 0, speedPct: 0 },
   hard: { anglePct: 0.0025, speedPct: 0.025 },
   medium: { anglePct: 0.005, speedPct: 0.05 },
@@ -570,7 +582,7 @@ function aiMove() {
   // (so it avoids lines that self-pocket when the shot wobbles), then apply that error.
   const diff = difficulty();
   // let the AI also consider left/no/right spin; it keeps spin=0 unless a spun line scores better
-  const shot = applyError(chooseShot(game, { robust: diff, spins: [-0.7, 0, 0.7] }), diff);
+  const shot = applyError(chooseShot(game, { robust: diff, ...(diff.search ?? AI_SEARCH) }), diff);
   const toX = legalStrikerX(shot.strikerPos.x, shot.strikerPos.y);
   aiSlide = { fromX: strikerPos.x, toX, y: shot.strikerPos.y, startedAt: performance.now(), shot };
   previewCache = null; // fresh preview for the AI's chosen line
