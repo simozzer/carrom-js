@@ -605,17 +605,21 @@ function endShot() {
 // synchronous compute if module workers aren't available. The chosen line gets its
 // execution-error wobble applied on the main thread (cheap, and keeps the workers pure).
 const AI_POOL_SIZE = Math.max(2, Math.min((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4, 8));
+const AI_TIMEOUT_MS = 8000; // safety net: a worker that dies / never loads must not hang the turn
 let aiPool = null; // null = not built, false = unavailable, else Worker[]
 let aiReqId = 0;
-let aiPending = null; // { reqId, diff, need, got: [] } while a fan-out search is in flight
+let aiPending = null; // in-flight fan-out: { reqId, diff, config, pending:Set<Worker>, got, replies, timer }
 function ensureAiPool() {
   if (aiPool !== null || typeof Worker === 'undefined') return aiPool;
   try {
     aiPool = [];
     for (let i = 0; i < AI_POOL_SIZE; i++) {
       const w = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
-      w.onmessage = (e) => aiContribute(e.data.shot, e.data.reqId);
-      w.onerror = () => { aiContribute(null, aiPending?.reqId); aiPool = aiPool && aiPool.filter((x) => x !== w); };
+      // A worker answers with the reqId it was dispatched for; on error it carries none of its
+      // own, so we use the reqId we stamped on it at dispatch (w._aiReq) — never the live
+      // aiPending, which would mis-credit a stale error to a newer request.
+      w.onmessage = (e) => aiResolve(w, e.data.reqId, e.data.shot, false);
+      w.onerror = () => aiResolve(w, w._aiReq, null, true);
       aiPool.push(w);
     }
   } catch {
@@ -628,19 +632,36 @@ function startAiSlide(shot) {
   aiSlide = { fromX: strikerPos.x, toX, y: shot.strikerPos.y, startedAt: performance.now(), shot };
   previewCache = null; // fresh preview for the AI's chosen line
 }
-// one worker reported its best (or null); once the whole pool is in, merge and fire.
-function aiContribute(shot, reqId) {
-  if (!aiPending || reqId !== aiPending.reqId) return; // stale / superseded request
+// A pool worker answered for `reqId` — a shot, an empty slice (null), or an error. Each worker
+// counts at most once (tracked in `pending`), so neither a double-fire (message + error) nor a
+// stale reply from a superseded request can mis-balance the tally or finalize early.
+function aiResolve(worker, reqId, shot, isError) {
+  if (!aiPending || reqId !== aiPending.reqId || !aiPending.pending.has(worker)) return;
+  aiPending.pending.delete(worker);
+  if (!isError) aiPending.replies += 1; // a delivered message (even a null shot) proves it's alive
   if (shot) aiPending.got.push(shot);
-  if (--aiPending.need > 0) return; // wait for the rest of the pool
-  const { got, diff, config } = aiPending;
+  if (aiPending.pending.size === 0) finalizeAiSearch();
+}
+// a worker never answered in time → stop waiting and decide with whatever came back.
+function aiTimeout(reqId) {
+  if (!aiPending || aiPending.reqId !== reqId) return;
+  aiPending.pending.clear();
+  finalizeAiSearch();
+}
+function finalizeAiSearch() {
+  clearTimeout(aiPending.timer);
+  const { got, diff, config, replies } = aiPending;
   aiPending = null;
+  // No worker even delivered a message (all errored / timed out) → the pool is unusable (e.g.
+  // module workers unsupported). Tear it down so later turns go straight to sync instead of
+  // stalling on dead workers each time. (An empty `got` WITH replies>0 is a real no-candidate
+  // position, not a broken pool — leave the pool intact.)
+  if (replies === 0 && Array.isArray(aiPool)) { for (const w of aiPool) w.terminate(); aiPool = false; }
   if (!isAiTurn() || mode !== 'aiming' || aiSlide) return; // the turn moved on while it thought
   let best = null;
   for (const s of got) if (!best || s.score > best.score) best = s; // global best across slices
-  // If no worker returned a shot (every slice empty, OR the whole pool failed to load), do the
-  // full search synchronously here — chooseShot falls back to planShot only when there really
-  // are no candidates. This avoids playing a weak planShot when module workers are unsupported.
+  // best is null only when no slice produced a shot — fall back to a full synchronous search
+  // (chooseShot itself drops to planShot only if there genuinely are no candidates).
   startAiSlide(applyError(best ?? chooseShot(game, config), diff));
 }
 
@@ -652,10 +673,11 @@ function aiMove() {
   const config = { robust: { anglePct: diff.anglePct, speedPct: diff.speedPct }, ...(diff.search ?? AI_SEARCH) };
   const pool = ensureAiPool();
   if (pool && pool.length) {
-    aiReqId += 1;
-    aiPending = { reqId: aiReqId, diff, config, need: pool.length, got: [] };
+    const reqId = (aiReqId += 1);
+    aiPending = { reqId, diff, config, pending: new Set(pool), got: [], replies: 0, timer: setTimeout(() => aiTimeout(reqId), AI_TIMEOUT_MS) };
     for (let i = 0; i < pool.length; i++) {
-      pool[i].postMessage({ pieces: game.pieces, turn: game.turn, config: { ...config, slice: { workers: pool.length, index: i } }, reqId: aiReqId });
+      pool[i]._aiReq = reqId; // so this worker's onerror can name the request it was dispatched for
+      pool[i].postMessage({ pieces: game.pieces, turn: game.turn, config: { ...config, slice: { workers: pool.length, index: i } }, reqId });
     }
   } else {
     startAiSlide(applyError(chooseShot(game, config), diff)); // synchronous fallback
