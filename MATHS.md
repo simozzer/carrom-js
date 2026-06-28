@@ -64,9 +64,12 @@ The loop ([engine.js](src/engine.js)) is:
 4. Re-detect only the events involving the one or two discs whose velocity just changed —
    everybody else's predictions are still valid — and repeat.
 
-This is the **event-prediction** scheme for granular/billiard dynamics; I arrived at it
-independently and later found it matches the published **Leckie–Greenspan** method. The
-incremental "re-detect only what changed" step (step 4) drops the analytic work from
+This is the **event-prediction** scheme for granular/billiard dynamics. I want to be exact
+about provenance: **I had never heard of the prior art while building this.** I designed the
+next-event approach from first principles specifically to avoid frame-stepping, and only
+*afterwards* discovered it coincides with the published **Leckie–Greenspan** method — a case
+of independent reinvention, not of working from a known technique. The incremental
+"re-detect only what changed" step (step 4) drops the analytic work from
 $O(\text{events} \cdot N^2)$ to $O(\text{events} \cdot N)$ for $N$ discs.
 
 ---
@@ -281,7 +284,7 @@ candidate shots feasible in a fraction of a second.
 
 | Piece | Source |
 |---|---|
-| Event-driven prediction scheme (≈ Leckie–Greenspan) | mine, independent |
+| Event-driven prediction scheme (≈ Leckie–Greenspan) | mine — independent reinvention, no prior knowledge of the method |
 | Equations of motion under dry friction (§1) | mine |
 | Wall / pocket quadratic solves (§3.1, 3.3) | mine |
 | Piecewise two-window pair decomposition (§3.4) | mine |
