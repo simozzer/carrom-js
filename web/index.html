@@ -32,6 +32,13 @@
       #howto .step { font-weight: 700; color: #f0c419; margin-right: 6px; }
       body.turn-white #howto .step { color: var(--white-accent); }
       body.turn-black #howto .step { color: var(--black-accent); }
+      /* spin slider below the board */
+      #spin-control { width: min(600px, 100%); display: flex; align-items: center; gap: 8px;
+                      padding: 2px 4px; font-size: 12px; }
+      #spin-control .spin-label { font-weight: 700; color: #f0c419; }
+      #spin-control .spin-end { opacity: .6; white-space: nowrap; }
+      #spin-control input[type=range] { flex: 1; accent-color: #2e8b57; cursor: pointer; }
+      #spin-control output { min-width: 34px; text-align: right; opacity: .8; font-variant-numeric: tabular-nums; }
       #msg { width: min(600px, 100%); min-height: 20px; text-align: center; color: #f0c419; font-weight: 600; transition: color .2s; }
       body.turn-white #msg { color: var(--white-accent); }
       body.turn-black #msg { color: var(--black-accent); font-style: italic; }
@@ -86,6 +93,13 @@
     </div>
     <div id="howto"><span class="step">Your shot</span>Drag the striker, set the power, then aim.</div>
     <canvas id="board" width="600" height="600"></canvas>
+    <div id="spin-control">
+      <span class="spin-label">Spin</span>
+      <span class="spin-end">◀ L</span>
+      <input type="range" id="spin" min="-1" max="1" step="0.01" value="0" />
+      <span class="spin-end">R ▶</span>
+      <output id="spin-val">0</output>
+    </div>
     <div id="msg">White to break</div>
     <div style="opacity:.85;font-size:13px;margin-top:2px">
       <label><input type="checkbox" id="selfplay" /> computer vs computer (auto-play)</label>

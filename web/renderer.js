@@ -40,6 +40,7 @@ const onSlider = (px, py) =>
   px >= SLIDER.x - SLIDER.hitW / 2 - HIT_PAD && px <= SLIDER.x + SLIDER.hitW / 2 + HIT_PAD &&
   py >= SLIDER.top - 12 - HIT_PAD && py <= SLIDER.bottom + 12 + HIT_PAD;
 
+
 // Fine-tune controls, drawn as a row in the bottom margin (same on-canvas "control area" as
 // the slider). Only live while a shot is locked for fine-tuning. The angle buttons hold-to-
 // repeat via the leftHeld/rightHeld flags the arrow keys also drive.
@@ -74,9 +75,6 @@ const PLAYBACK_RATE = 0.6; // <1 plays the shot back slower than real time
 // Trajectory-depth menu: how many collisions the preview looks ahead (0 = off).
 const TRAJECTORY = { none: 0, immediate: 2, full: 30 };
 const trajectoryDepth = () => TRAJECTORY[document.getElementById('trajectory')?.value] ?? TRAJECTORY.full;
-const FAN_LINES = 4; // perturbed paths each side of the aim (uncertainty fan)
-const FAN_HALF_ANGLE = 0.07; // ~4° half-spread for the fan
-const FAN_EVENTS = 1; // fan paths drawn up to first contact (cheap + most telling)
 const PREVIEW_REFRESH_MS = 40; // recompute throttle (analytic solver is cheap → responsive)
 
 let game = newGame();
@@ -108,6 +106,8 @@ let meta = new Map();
 let endT = 0;
 let startedAt = 0;
 let soundIdx = 0; // index of the last collision whose knock has played
+const SETTLE_HOLD_MS = 300; // hold the final resting frame this long before resolving the turn
+let settleAt = 0; // timestamp when all pieces came to rest (0 = not yet)
 
 // --- sound: a synthesised "knock" on each puck/puck and wall collision -------
 let audioCtx = null;
@@ -153,9 +153,25 @@ let holding = false; // dragging on the board to set the aim direction
 let sliderDragging = false; // dragging the power slider
 const DEFAULT_POWER = 1.0; // m/s — the slider resets here at the start of each turn
 let power = DEFAULT_POWER; // m/s — set by the slider, reset every turn
+let spin = 0; // −1 (full left) .. +1 (full right) strike offset; reset every turn
+
+// Spin slider lives below the board (HTML <input type=range>). Drives the off-centre-strike
+// spin / "throw" physics; the preview recomputes so the predicted path shows the curve.
+const spinInput = document.getElementById('spin');
+const spinVal = document.getElementById('spin-val');
+function syncSpinLabel() {
+  const s = spin;
+  spinVal.textContent = Math.abs(s) < 0.005 ? '0' : `${s > 0 ? 'R' : 'L'} ${Math.abs(s).toFixed(2)}`;
+}
+spinInput?.addEventListener('input', () => {
+  const s = parseFloat(spinInput.value);
+  spin = Math.abs(s) < 0.04 ? 0 : s; // dead-zone at centre so "no spin" is easy to hit
+  previewCache = null; // refresh the preview so the throw shows
+  syncSpinLabel();
+});
 let aimAngle = 0;
 let aimPoint = null;
-let previewCache = null; // { main: Map<id, pts[]>, fan: pts[][] }
+let previewCache = null; // { main: Map<id, pts[]> }
 let previewAt = 0;
 
 // fine-tune (adjust) phase: after releasing, lock angle/power; arrows nudge, Enter fires
@@ -207,7 +223,7 @@ function howtoStage() {
   if (adjusting) return { step: 'Step 4 · Fine-tune', text: 'Nudge the angle with ← → or the on-screen buttons, then Fire (Enter). Esc cancels.' };
   if (holding) return { step: 'Step 3 · Aim', text: 'Drag to point the shot forward (you can’t fire sideways or backward) — release to lock it in.' };
   if (dragging) return { step: 'Step 1 · Position', text: 'Slide the striker along your baseline, then release.' };
-  return { step: 'Your shot', text: '① Drag the striker along your baseline · ② set the power on the right-hand slider · ③ drag on the board to aim.' };
+  return { step: 'Your shot', text: '① Drag the striker · ② power (right slider) · ③ spin (slider below the board, L/R — optional) · ④ drag on the board to aim.' };
 }
 
 let lastHowto = null;
@@ -392,19 +408,13 @@ function pathsFromTimeline(timeline) {
 
 function lookAhead(angle, speed, maxEvents) {
   const bodies = shotBodies(game, strikerPos);
-  return simulate({ bodies }, { strikerId: 'striker', angle, speed }, { maxEvents }).timeline;
+  // include the current spin so the preview shows the throw; opts.spin enables Phase-3 physics
+  return simulate({ bodies }, { strikerId: 'striker', angle, speed, spin }, { maxEvents, spin: spin !== 0 }).timeline;
 }
 
-// Recompute the exact path + the perturbed-aim fan (throttled; cached between).
+// Recompute the exact predicted paths (throttled; cached between).
 function computePreview(angle, speed, now) {
-  const main = pathsFromTimeline(lookAhead(angle, speed, trajectoryDepth()));
-  const fan = [];
-  for (let i = -FAN_LINES; i <= FAN_LINES; i++) {
-    if (i === 0) continue;
-    const tl = lookAhead(angle + (i / FAN_LINES) * FAN_HALF_ANGLE, speed, FAN_EVENTS);
-    fan.push(tl.map((s) => s.bodies.find((b) => b.id === 'striker').pos));
-  }
-  previewCache = { main, fan };
+  previewCache = { main: pathsFromTimeline(lookAhead(angle, speed, trajectoryDepth())) };
   previewAt = now;
 }
 
@@ -423,11 +433,6 @@ function drawPreview(now, angle, speed) {
   if (!previewCache || now - previewAt > PREVIEW_REFRESH_MS) computePreview(angle, speed, now);
 
   ctx.save();
-  // uncertainty fan — faint striker spread under slightly perturbed aim
-  ctx.strokeStyle = 'rgba(40, 40, 90, 0.16)';
-  ctx.lineWidth = 1;
-  for (const pts of previewCache.fan) if (pts.length > 1) polyline(pts);
-
   // exact predicted paths
   for (const [id, pts] of previewCache.main) {
     const last = pts[pts.length - 1];
@@ -530,6 +535,9 @@ function drawAim() {
 function endShot() {
   mode = game.winner ? 'gameover' : 'aiming';
   power = DEFAULT_POWER; // reset the power slider for the new turn
+  spin = 0; // reset spin for the new turn
+  if (spinInput) spinInput.value = '0';
+  syncSpinLabel();
   const home = strikerHome(turnColor(game));
   strikerPos = { x: legalStrikerX(home.x, home.y), y: home.y };
   updateHud();
@@ -561,7 +569,8 @@ function aiMove() {
   // Pick the shot, made robust against the same execution-error the difficulty will apply
   // (so it avoids lines that self-pocket when the shot wobbles), then apply that error.
   const diff = difficulty();
-  const shot = applyError(chooseShot(game, { robust: diff }), diff);
+  // let the AI also consider left/no/right spin; it keeps spin=0 unless a spun line scores better
+  const shot = applyError(chooseShot(game, { robust: diff, spins: [-0.7, 0, 0.7] }), diff);
   const toX = legalStrikerX(shot.strikerPos.x, shot.strikerPos.y);
   aiSlide = { fromX: strikerPos.x, toX, y: shot.strikerPos.y, startedAt: performance.now(), shot };
   previewCache = null; // fresh preview for the AI's chosen line
@@ -571,23 +580,25 @@ function frame(now) {
   updateHowto(); // refresh the stage-aware instruction banner
   drawBoard();
   if (mode === 'animating') {
-    const simT = ((now - startedAt) / 1000) * PLAYBACK_RATE;
-    if (simT >= endT) {
-      endShot();
-    } else {
-      while (soundIdx + 1 < timeline.length && timeline[soundIdx + 1].t <= simT) {
-        soundIdx += 1;
-        const kind = timeline[soundIdx].kind;
-        if (kind === 'pair' || kind === 'wall') knock(kind);
-      }
-      const seg = timeline[soundIdx];
-      const dt = simT - seg.t;
-      for (const e of seg.bodies) {
-        if (e.pocketed) continue;
-        const m = meta.get(e.id);
-        const p = positionAfter(e.pos, e.vel, dt);
-        disc(p.x, p.y, m.radius, COLORS[m.color] ?? COLORS[m.kind]);
-      }
+    const rawT = ((now - startedAt) / 1000) * PLAYBACK_RATE;
+    const simT = Math.min(rawT, endT); // clamp so the final resting frame stays drawn during the hold
+    while (soundIdx + 1 < timeline.length && timeline[soundIdx + 1].t <= simT) {
+      soundIdx += 1;
+      const kind = timeline[soundIdx].kind;
+      if (kind === 'pair' || kind === 'wall') knock(kind);
+    }
+    const seg = timeline[soundIdx];
+    const dt = simT - seg.t;
+    for (const e of seg.bodies) {
+      if (e.pocketed) continue;
+      const m = meta.get(e.id);
+      const p = positionAfter(e.pos, e.vel, dt);
+      disc(p.x, p.y, m.radius, COLORS[m.color] ?? COLORS[m.kind]);
+    }
+    if (rawT >= endT) {
+      // all pieces have stopped — hold the final position briefly before resolving the turn
+      if (!settleAt) settleAt = now;
+      if (now - settleAt >= SETTLE_HOLD_MS) { settleAt = 0; endShot(); }
     }
   } else {
     drawStatic();
@@ -608,7 +619,7 @@ function frame(now) {
         strikerPos = { x: aiSlide.toX, y: aiSlide.y };
         aiSlide = null;
         previewCache = null;
-        flick(shot.speed, shot.angle);
+        flick(shot.speed, shot.angle, shot.spin || 0);
       } else {
         // striker position: easing in during the slide, parked thereafter
         if (t < tA) {
@@ -618,14 +629,19 @@ function frame(now) {
         } else {
           strikerPos = { x: aiSlide.toX, y: aiSlide.y };
         }
-        // power: empty until charging, ease up during the charge, then hold at the chosen speed
-        if (t < tB) power = 0;
-        else if (t < tC) power = (1 - (1 - Math.min(1, (t - tB) / AI_CHARGE_MS)) ** 3) * shot.speed;
-        else power = shot.speed;
+        // power + spin ease up together during the charge stage, then hold at the chosen values
+        const ramp = t < tB ? 0 : 1 - (1 - Math.min(1, (t - tB) / AI_CHARGE_MS)) ** 3; // easeOutCubic
+        power = ramp * shot.speed;
+        const aiSpin = ramp * (shot.spin || 0); // drive the spin slider so the choice is visible
+        if (spin !== aiSpin) {
+          spin = aiSpin;
+          if (spinInput) spinInput.value = String(aiSpin);
+          syncSpinLabel();
+        }
         // buttons: angle pressed while aiming, Fire pressed during the final beat
         const pressed = t < tB ? aimDir : t >= tD ? 'fire' : null;
 
-        if (t >= tA) drawPreview(now, shot.angle, shot.speed); // planned line, once positioned
+        if (t >= tA) drawPreview(now, shot.angle, shot.speed); // planned line (incl. spin), once positioned
         drawStriker();
         drawSlider();
         drawFineButtons({ active: true, pressed });
@@ -654,14 +670,15 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-function flick(speed, angle) {
+function flick(speed, angle, spinAmt = 0) {
   angle = clampForwardAngle(turnColor(game), angle); // enforce the play-forward rule for every shot
-  const res = takeShot(game, strikerPos, angle, speed);
+  const res = takeShot(game, strikerPos, angle, speed, spinAmt);
   timeline = res.timeline;
   meta = res.meta;
   endT = timeline[timeline.length - 1].t;
   startedAt = performance.now();
   soundIdx = 0; // start of timeline is the 'start' snapshot — no knock
+  settleAt = 0; // reset the settle-hold timer for the new shot
   mode = 'animating';
 }
 
@@ -735,8 +752,8 @@ window.addEventListener('pointermove', (ev) => {
   const px = cursorPx(ev);
   // hover feedback for the on-canvas controls (pointer cursor over a button or the slider)
   ftHover = ftButtonAt(px.x, px.y);
-  const overSlider = mode === 'aiming' && !isAiTurn() && onSlider(px.x, px.y);
-  canvas.style.cursor = ftHover || overSlider ? 'pointer' : 'default';
+  const overCtrl = mode === 'aiming' && !isAiTurn() && onSlider(px.x, px.y);
+  canvas.style.cursor = ftHover || overCtrl ? 'pointer' : 'default';
 
   if (sliderDragging) {
     setPowerFromSlider(px.y);
@@ -749,7 +766,7 @@ window.addEventListener('pointermove', (ev) => {
     return;
   }
   if (holding) {
-    // swing the aim while dragging — the preview/fan recompute for the new (forward) direction
+    // swing the aim while dragging — the preview recomputes for the new (forward) direction
     setAimFromCursor(c);
   }
 });
@@ -805,7 +822,7 @@ function fireShot() {
   if (!adjusting) return;
   adjusting = false;
   leftHeld = rightHeld = false;
-  flick(lockedSpeed, lockedAngle);
+  flick(lockedSpeed, lockedAngle, spin);
 }
 function cancelShot() {
   if (!adjusting) return;

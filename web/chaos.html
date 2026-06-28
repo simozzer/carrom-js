@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Carrom-JS · Chaos Map</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      body { margin: 0; background: #1c1c1f; color: #eee; font: 14px system-ui, sans-serif;
+             min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+             gap: 12px; padding: 18px 10px 40px; }
+      h1 { font-size: 18px; margin: 0; font-weight: 700; }
+      h1 span { color: #f0c419; }
+      .blurb { max-width: 640px; text-align: center; opacity: .8; font-size: 13px; line-height: 1.5; }
+      .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: center; }
+      .controls label { opacity: .85; }
+      select, button { font: 600 13px system-ui, sans-serif; color: #eee; background: #34343a;
+                       border: 1px solid #555; border-radius: 7px; padding: 7px 12px; cursor: pointer; }
+      button:hover:not(:disabled) { background: #44444c; }
+      button:disabled { opacity: .4; cursor: default; }
+      #render { border-color: #2e8b57; }
+      #stop { border-color: #c0392b; }
+      #status { font-size: 12px; opacity: .8; min-height: 16px; font-variant-numeric: tabular-nums; }
+      /* plot with axis labels */
+      .plot { display: grid; grid-template-columns: 22px auto; grid-template-rows: auto 22px; gap: 6px; }
+      .yaxis { grid-column: 1; grid-row: 1; writing-mode: vertical-rl; transform: rotate(180deg);
+               text-align: center; align-self: center; font-size: 12px; opacity: .7; }
+      .canvas-wrap { grid-column: 2; grid-row: 1; position: relative; line-height: 0; }
+      .xaxis { grid-column: 2; grid-row: 2; text-align: center; font-size: 12px; opacity: .7; }
+      canvas { width: min(620px, 92vw); height: auto; image-rendering: auto; background: #000;
+               box-shadow: 0 0 26px #000; cursor: crosshair; display: block; }
+      .ends { display: flex; justify-content: space-between; font-size: 11px; opacity: .55; margin-top: 2px; }
+      #readout { font-size: 12px; min-height: 16px; opacity: .9; font-variant-numeric: tabular-nums; }
+      .legend { max-width: 640px; font-size: 12px; opacity: .75; line-height: 1.5; }
+      a { color: #6fa8dc; }
+    </style>
+  </head>
+  <body>
+    <h1>Carrom-JS · <span>Chaos Map</span></h1>
+    <div class="blurb">
+      Every pixel is one shot fired into a rack of coins. <b>Left→right = aim angle</b>,
+      <b>bottom→top = power</b>. Colour = <b>which coins it pockets</b> (incl. the striker — a scratch);
+      brightness = <b>number of collisions</b>. The frilly, fractal boundaries are sensitive dependence:
+      a hair's change in aim flips the whole outcome.
+    </div>
+
+    <div class="controls">
+      <label>resolution
+        <select id="resolution">
+          <option value="300">300² (fast)</option>
+          <option value="450" selected>450²</option>
+          <option value="600">600² (sharp, slow)</option>
+        </select>
+      </label>
+      <label>angle span
+        <select id="span">
+          <option value="0.45">narrow</option>
+          <option value="0.6" selected>medium</option>
+          <option value="0.8">wide</option>
+        </select>
+      </label>
+      <button id="render">Render ▶</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+    <div id="status">idle</div>
+
+    <div class="plot">
+      <div class="yaxis">power →</div>
+      <div class="canvas-wrap">
+        <canvas id="map" width="450" height="450"></canvas>
+        <div class="ends"><span id="loA">angle</span><span>aim angle →</span><span id="hiA"></span></div>
+      </div>
+      <div class="xaxis"></div>
+    </div>
+    <div id="readout">click a pixel to inspect that shot</div>
+
+    <div class="legend">
+      Dark blue regions = no coin potted (still textured by how many times things bounced).
+      Desaturated/grey bands = the striker scratched. This is <i>dissipative</i> billiards (friction +
+      restitution &lt; 1), so it's <b>transient chaos</b> — chaotic until everything comes to rest.
+      The engine predicts every collision analytically, so the structure you see is real, not solver noise.
+      · <a href="./index.html">back to the game</a>
+    </div>
+
+    <script type="module" src="./chaos.js"></script>
+  </body>
+</html>
