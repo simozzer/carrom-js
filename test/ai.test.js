@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { newGame, takeShot, baselineY, strikerXLimit } from '../src/game.js';
+import { newGame, takeShot, baselineY, strikerXLimit, shotBodies } from '../src/game.js';
 import { planShot, jitterShot, chooseShot, applyError } from '../src/ai.js';
+import { simulate } from '../src/simulate.js';
 
 const blackToPlay = () => {
   const g = newGame();
@@ -75,4 +76,26 @@ test('an AI turn runs through the physics and conserves pieces', () => {
   assert.ok(r.timeline.length > 0);
   assert.equal(g.pieces.filter((p) => p.color === 'white').length + g.pocketed.white, 9);
   assert.equal(g.pieces.filter((p) => p.color === 'black').length + g.pocketed.black, 9);
+});
+
+test('chooseShot defaults to no spin', () => {
+  const s = chooseShot(blackToPlay(), { maxEvents: 25 });
+  assert.equal(s.spin, 0);
+});
+
+test('chooseShot only ever returns one of the offered spin values', () => {
+  const s = chooseShot(blackToPlay(), { maxEvents: 25, spins: [-0.7, 0, 0.7] });
+  assert.ok([-0.7, 0, 0.7].includes(s.spin), `spin ${s.spin} not in the offered set`);
+});
+
+test('AI banks off the far cushion to pot a coin behind its baseline', () => {
+  // A lone White coin past the baseline: no legal forward DIRECT line exists, only a bank.
+  const g = newGame();
+  g.turn = 0; // White, baseline at the bottom (fires +y)
+  g.pieces = [{ id: 'm0', color: 'white', pos: { x: 0, y: -0.3 } }];
+  const shot = chooseShot(g, {});
+  assert.ok(Math.sin(shot.angle) > 0, 'fires forward into the board (not backward at the coin)');
+  const bodies = shotBodies(g, shot.strikerPos);
+  const res = simulate({ bodies }, { strikerId: 'striker', angle: shot.angle, speed: shot.speed }, { timeline: false });
+  assert.ok(res.pocketed.includes('m0'), 'pots the behind-baseline coin via a cushion rebound');
 });

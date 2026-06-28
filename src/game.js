@@ -295,10 +295,10 @@ export function shotBodies(state, strikerPos) {
 
 // Run a shot, classify what was pocketed, update the on-board pieces and apply the rules.
 // Returns { timeline, meta, outcome } — meta maps id -> {color, kind, radius} for replay.
-export function takeShot(state, strikerPos, angle, speed) {
+export function takeShot(state, strikerPos, angle, speed, spin = 0) {
   const bodies = shotBodies(state, strikerPos);
   const meta = new Map(bodies.map((b) => [b.id, { color: b.color, kind: b.kind, radius: b.radius }]));
-  const res = simulate({ bodies }, { strikerId: 'striker', angle, speed });
+  const res = simulate({ bodies }, { strikerId: 'striker', angle, speed, spin }, { spin: spin !== 0 });
 
   const byId = new Map(bodies.map((b) => [b.id, b]));
   const pocketed = new Set(res.pocketed);

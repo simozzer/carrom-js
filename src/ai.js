@@ -130,7 +130,7 @@ export function planShot(game) {
   const targets = game.pieces.filter((p) => p.color === color);
   const tgt = targets[0] ? targets[0].pos : v.vec(0, 0);
   const angle = clampForwardAngle(color, Math.atan2(tgt.y - y0, tgt.x)); // never fire backward
-  return { strikerPos: v.vec(0, y0), angle, speed: 3.5 };
+  return { strikerPos: v.vec(0, y0), angle, speed: 3.5, spin: 0 };
 }
 
 // Score a simulated shot result from `color`'s perspective.
@@ -150,9 +150,9 @@ function scoreResult(res, byId, color) {
 }
 
 // Simulate one shot to rest and score the outcome from `color`'s perspective.
-function simScore(game, color, strikerPos, angle, speed, maxEvents) {
+function simScore(game, color, strikerPos, angle, speed, maxEvents, spin = 0) {
   const bodies = shotBodies(game, strikerPos);
-  const res = simulate({ bodies }, { strikerId: 'striker', angle, speed }, { maxEvents, timeline: false });
+  const res = simulate({ bodies }, { strikerId: 'striker', angle, speed, spin }, { maxEvents, timeline: false, spin: spin !== 0 });
   const byId = new Map(bodies.map((b) => [b.id, b]));
   return scoreResult(res, byId, color);
 }
@@ -168,6 +168,9 @@ function simScore(game, color, strikerPos, angle, speed, maxEvents) {
 //   maxEvents     — collision cap per simulation; omit/undefined = run to rest (depth)
 //   powerScales   — power multipliers tried per candidate
 //   angleOffsets  — angle nudges (radians) tried per candidate
+//   spins         — strike-offset spins (−1..1) tried per candidate; default [0] = no spin.
+//                   Off-centre spin only helps situationally, so spin=0 is in the set and
+//                   wins unless a spun variant scores strictly better.
 //   robust        — { anglePct, speedPct, keep? }: re-rank the top `keep` lines by their
 //                   EXPECTED score over the execution-error box (the same ±pct wobble that
 //                   applyError will add), so a line that only pots on a knife-edge — and
@@ -175,20 +178,22 @@ function simScore(game, color, strikerPos, angle, speed, maxEvents) {
 //                   that stays safe. Pass the chosen difficulty's pcts here.
 export function chooseShot(
   game,
-  { maxCandidates = 10, maxEvents, powerScales = [0.8, 1.0, 1.15], angleOffsets = [-0.01, 0, 0.01], robust = null } = {},
+  { maxCandidates = 10, maxEvents, powerScales = [0.8, 1.0, 1.15], angleOffsets = [-0.01, 0, 0.01], spins = [0], robust = null } = {},
 ) {
   const color = turnColor(game);
   const base = candidateShots(game).slice(0, maxCandidates);
 
-  // Pass 1: nominal score of every power × angle variant of every candidate line.
+  // Pass 1: nominal score of every power × angle × spin variant of every candidate line.
   const scored = [];
   for (const c of base) {
     for (const ps of powerScales) {
       const speed = Math.max(2.0, Math.min(6.0, c.speed * ps)); // keep within the legal power band
       for (const ao of angleOffsets) {
         const angle = clampForwardAngle(color, c.angle + ao);
-        const score = simScore(game, color, c.strikerPos, angle, speed, maxEvents) + c.geom; // geom breaks ties
-        scored.push({ strikerPos: c.strikerPos, angle, speed, score });
+        for (const spin of spins) {
+          const score = simScore(game, color, c.strikerPos, angle, speed, maxEvents, spin) + c.geom; // geom breaks ties
+          scored.push({ strikerPos: c.strikerPos, angle, speed, spin, score });
+        }
       }
     }
   }
@@ -212,7 +217,7 @@ export function chooseShot(
         if (da === 0 && ds === 0) continue; // ...plus the 8 surrounding error-box samples
         const angle = clampForwardAngle(color, cand.angle * (1 + da * ap));
         const speed = Math.max(2.0, Math.min(6.0, cand.speed * (1 + ds * sp)));
-        sum += simScore(game, color, cand.strikerPos, angle, speed, maxEvents);
+        sum += simScore(game, color, cand.strikerPos, angle, speed, maxEvents, cand.spin);
         n += 1;
       }
     }

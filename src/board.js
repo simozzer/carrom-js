@@ -16,6 +16,12 @@ export const STRIKER = { radius: 0.02065, mass: 0.015 }; // striker ⌀41.3 mm, 
 export const QUEEN = { radius: 0.0159, mass: 0.005 }; // queen = carrom-man size, red
 export const PUCK_RESTITUTION = 0.8;
 
+// Phase 3 (spin / "throw"): tangential friction coefficients at impulsive contacts. The
+// tangential impulse that exchanges spin <-> sideways velocity is Coulomb-clamped to
+// muT * |normal impulse|. Opt-in via simulate(..., { spin: true }).
+export const PUCK_FRICTION_T = 0.12; // disc–disc throw
+export const CUSHION_FRICTION_T = 0.2; // disc–cushion throw
+
 // Inward-facing axis bounds, board centred on the origin.
 export const walls = () => {
   const h = BOARD.size / 2;

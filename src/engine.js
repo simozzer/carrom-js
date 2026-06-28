@@ -13,9 +13,13 @@
 import * as v from './vec2.js';
 import { detectWall, detectPair, detectPocket } from './events.js';
 import { resolvePair, resolveWall } from './collisions.js';
-import { walls, pockets, PUCK_RESTITUTION, BOARD } from './board.js';
+import { walls, pockets, PUCK_RESTITUTION, BOARD, FRICTION_MU, GRAVITY, PUCK_FRICTION_T, CUSHION_FRICTION_T } from './board.js';
 
 const MAX_EVENTS = 100000;
+const DECEL = FRICTION_MU * GRAVITY;
+// Angular friction deceleration of a uniform disc spinning on the board: torque ≈ (2/3)μmgR,
+// so dω/dt ≈ (4/3)μg/R. Used only when spin is enabled.
+const SPIN_DECEL_K = (4 / 3) * DECEL;
 
 const snap = (bodies, t, kind) => ({
   t,
@@ -29,10 +33,16 @@ const snap = (bodies, t, kind) => ({
 });
 
 // Move all active bodies forward by dt, stopping any whose phase ends within dt.
+// Spin (when present) decays under angular board friction, independent of translation.
 function advance(bodies, dt) {
   if (dt <= 0) return;
   for (const b of bodies) {
-    if (b.pocketed || !b.moving) continue;
+    if (b.pocketed) continue;
+    if (b.omega) {
+      const dw = (SPIN_DECEL_K / b.radius) * dt;
+      b.omega = Math.abs(b.omega) <= dw ? 0 : b.omega - Math.sign(b.omega) * dw;
+    }
+    if (!b.moving) continue;
     const stopped = dt >= b.stopTime();
     b.pos = b.posAt(dt);
     b.vel = stopped ? v.vec(0, 0) : b.velAt(dt);
@@ -49,11 +59,19 @@ export function runEngine(layout, shot, opts = {}) {
   // Building a full replay timeline costs a deep body-copy per event. Callers that only
   // need the final outcome (the AI's look-ahead) pass timeline:false to skip it entirely.
   const wantTimeline = opts.timeline !== false;
+  // Phase 3 spin/throw is opt-in. When off, the friction coefficients are 0 and the resolvers
+  // behave exactly as Phase 1 (byte-identical), so existing behaviour is unchanged.
+  const spin = opts.spin === true;
+  const muPair = spin ? PUCK_FRICTION_T : 0;
+  const muWall = spin ? CUSHION_FRICTION_T : 0;
   const bodies = layout.bodies;
   if (shot) {
     const striker = bodies.find((b) => b.id === shot.strikerId);
     if (!striker) throw new Error(`shot.strikerId ${shot.strikerId} not found`);
     striker.vel = v.fromAngle(shot.angle, shot.speed);
+    // Off-centre strike: a flick offset by (shot.spin · radius) from centre imparts spin
+    // ω = strike-moment / I = (offset · m·v) / (½ m r²) = 2·spin·speed / radius.
+    if (spin && shot.spin) striker.omega = (2 * shot.spin * shot.speed) / striker.radius;
   }
 
   const bounds = walls();
@@ -110,14 +128,14 @@ export function runEngine(layout, shot, opts = {}) {
     t = next.time;
 
     if (next.kind === 'wall') {
-      resolveWall(bodies[next.i], next.axis, BOARD.cushionRestitution);
+      resolveWall(bodies[next.i], next.axis, BOARD.cushionRestitution, 1e-3, muWall);
     } else if (next.kind === 'pocket') {
       const b = bodies[next.i];
       b.pocketed = true;
       b.vel = v.vec(0, 0);
       b.pocket = next.pocketIndex;
     } else {
-      resolvePair(bodies[next.i], bodies[next.j], PUCK_RESTITUTION);
+      resolvePair(bodies[next.i], bodies[next.j], PUCK_RESTITUTION, muPair);
     }
 
     if (wantTimeline) timeline.push(snap(bodies, t, next.kind));
