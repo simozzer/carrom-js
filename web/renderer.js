@@ -136,23 +136,45 @@ function unlockAudio() {
   }
 }
 const soundOn = () => document.getElementById('sound')?.checked;
-function knock(kind) {
+const KNOCK_FULL_SPEED = 3.5; // impact speed (m/s) at which a knock is at full volume
+// A short band-passed noise burst — a hard plastic/wood "clack", not a tonal drum. Impact
+// speed (`intensity`, m/s) sets the volume and the brightness (band centre); a high filter Q
+// makes the noise ring briefly at a pitch so it reads as a click, not a hiss. The very short
+// decay is what keeps it snappy rather than log-drum-y.
+function knock(kind, intensity = KNOCK_FULL_SPEED) {
   // stay silent until audio has been unlocked by a gesture and is actually running
   if (!soundOn() || !audioCtx || audioCtx.state !== 'running') return;
   try {
     const ctx = audioCtx;
     const t = ctx.currentTime;
-    const o = ctx.createOscillator();
+    const wall = kind === 'wall';
+    const hard = Math.max(0, Math.min(1, intensity / KNOCK_FULL_SPEED)); // 0 (soft) .. 1 (full smash)
+
+    // white-noise burst = the impact transient
+    const len = Math.ceil(ctx.sampleRate * 0.06);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+
+    // band-pass with high Q rings the noise at a pitch → a "clack". Cushion lower & duller
+    // than disc-on-disc; harder hits open brighter. (Pitch tracks the objects, not the speed.)
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    const centre = (wall ? 1100 : 2200) * (0.9 + Math.random() * 0.2); // slight per-hit variation
+    bp.frequency.value = centre + hard * (wall ? 500 : 1200);
+    bp.Q.value = wall ? 4 : 7;
+
     const g = ctx.createGain();
-    o.type = 'triangle';
-    const base = kind === 'wall' ? 200 : 330; // cushion duller than puck/puck
-    o.frequency.value = base * (0.92 + Math.random() * 0.16); // slight variation per hit
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(kind === 'wall' ? 0.18 : 0.22, t + 0.004);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
-    o.connect(g).connect(ctx.destination);
-    o.start(t);
-    o.stop(t + 0.09);
+    const peak = (wall ? 0.5 : 0.6) * Math.max(0.12, hard); // softer hits quieter (12% floor)
+    const decay = wall ? 0.05 : 0.03; // short & snappy (was ~0.08s tonal → drum-like)
+    g.gain.setValueAtTime(Math.max(0.0003, peak), t); // instant attack = the clack
+    g.gain.exponentialRampToValueAtTime(0.0003, t + decay);
+
+    src.connect(bp).connect(g).connect(ctx.destination);
+    src.start(t);
+    src.stop(t + 0.06);
   } catch {
     /* no audio device available — play silently */
   }
@@ -596,8 +618,8 @@ function frame(now) {
     const simT = Math.min(rawT, endT); // clamp so the final resting frame stays drawn during the hold
     while (soundIdx + 1 < timeline.length && timeline[soundIdx + 1].t <= simT) {
       soundIdx += 1;
-      const kind = timeline[soundIdx].kind;
-      if (kind === 'pair' || kind === 'wall') knock(kind);
+      const snap = timeline[soundIdx];
+      if (snap.kind === 'pair' || snap.kind === 'wall') knock(snap.kind, snap.intensity);
     }
     const seg = timeline[soundIdx];
     const dt = simT - seg.t;

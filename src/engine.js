@@ -21,9 +21,10 @@ const DECEL = FRICTION_MU * GRAVITY;
 // so dω/dt ≈ (4/3)μg/R. Used only when spin is enabled.
 const SPIN_DECEL_K = (4 / 3) * DECEL;
 
-const snap = (bodies, t, kind) => ({
+const snap = (bodies, t, kind, intensity = 0) => ({
   t,
   kind, // 'start' | 'pair' | 'wall' | 'pocket' | 'end' — what produced this snapshot
+  intensity, // impact speed (m/s) that produced this event — drives collision sound volume
   bodies: bodies.map((b) => ({
     id: b.id,
     pos: { x: b.pos.x, y: b.pos.y },
@@ -127,18 +128,29 @@ export function runEngine(layout, shot, opts = {}) {
     advance(bodies, Math.max(0, next.time - t));
     t = next.time;
 
+    // Impact speed (m/s) just before resolving — how "hard" the contact is; drives sound volume.
+    // Only needed for the replay timeline, so skip it on the AI's timeline:false look-aheads.
+    let intensity = 0;
     if (next.kind === 'wall') {
-      resolveWall(bodies[next.i], next.axis, BOARD.cushionRestitution, 1e-3, muWall);
+      const b = bodies[next.i];
+      if (wantTimeline) intensity = Math.abs(next.axis === 'x' ? b.vel.x : b.vel.y); // incoming normal speed
+      resolveWall(b, next.axis, BOARD.cushionRestitution, 1e-3, muWall);
     } else if (next.kind === 'pocket') {
       const b = bodies[next.i];
       b.pocketed = true;
       b.vel = v.vec(0, 0);
       b.pocket = next.pocketIndex;
     } else {
-      resolvePair(bodies[next.i], bodies[next.j], PUCK_RESTITUTION, muPair);
+      const a = bodies[next.i];
+      const b = bodies[next.j];
+      if (wantTimeline) {
+        const n = v.normalize(v.sub(a.pos, b.pos));
+        intensity = Math.abs(v.dot(v.sub(a.vel, b.vel), n)); // closing speed along the contact normal
+      }
+      resolvePair(a, b, PUCK_RESTITUTION, muPair);
     }
 
-    if (wantTimeline) timeline.push(snap(bodies, t, next.kind));
+    if (wantTimeline) timeline.push(snap(bodies, t, next.kind, intensity));
     count += 1;
   }
 
