@@ -1,12 +1,17 @@
 // engine.js — the event-driven loop.
 //
 // Loop:
-//   1. Detect ALL events from the current state (O(N^2) recompute — fine for N~20).
-//   2. Pop the earliest (tie-break: time, then kind, then indices — determinism).
-//   3. Advance every active body to that time along its phase trajectory, clamping any
+//   1. Pop the earliest predicted event (tie-break: time, then kind, then indices).
+//   2. Advance every active body to that time along its phase trajectory, clamping any
 //      that come to rest before then (no explicit 'stop' event — posAt/velAt clamp).
-//   4. Resolve the event (pair impulse / wall reflect / pocket capture).
+//   3. Resolve the event (pair impulse / wall reflect / pocket capture).
+//   4. Recompute only the events of the 1–2 bodies whose velocity just changed; every other
+//      body's predicted events stay valid (an unrelated collision doesn't alter its
+//      trajectory, and natural deceleration/stop is already baked into its predictions).
 //   5. Repeat until no body is moving (or a MAX_EVENTS safety cap).
+//
+// Caching events incrementally (rather than re-detecting all O(N^2) pairs every step) cuts the
+// expensive analytic pair-solves from O(events · N^2) to O(events · N).
 //
 // Emits a timeline of post-event snapshots (ending at rest) for replay by interpolation.
 
@@ -81,6 +86,62 @@ export function runEngine(layout, shot, opts = {}) {
   const timeline = wantTimeline ? [snap(bodies, 0, 'start')] : [];
   let count = 0;
 
+  // --- incremental event cache (absolute event times, recomputed only on velocity change) ---
+  const N = bodies.length;
+  const evWall = new Array(N).fill(null);
+  const evPock = new Array(N).fill(null);
+  const evPair = new Array(N * N).fill(null); // slot i*N+j (i<j)
+
+  const setWall = (i) => {
+    evWall[i] = null;
+    const b = bodies[i];
+    if (b.pocketed || !b.moving) return;
+    const w = detectWall(b, bounds);
+    if (w) evWall[i] = { time: t + w.time, kind: 'wall', i, axis: w.axis };
+  };
+  const setPock = (i) => {
+    evPock[i] = null;
+    const b = bodies[i];
+    if (b.pocketed || !b.moving) return;
+    const pk = detectPocket(b, pocketList);
+    if (pk) evPock[i] = { time: t + pk.time, kind: 'pocket', i, pocketIndex: pk.pocketIndex };
+  };
+  const setPair = (i, j) => {
+    // assumes i < j
+    evPair[i * N + j] = null;
+    const a = bodies[i];
+    const b = bodies[j];
+    if (a.pocketed || b.pocketed) return;
+    const tp = detectPair(a, b);
+    if (tp < Infinity) evPair[i * N + j] = { time: t + tp, kind: 'pair', i, j };
+  };
+  // body k's velocity changed → re-detect everything it can be involved in
+  const recompute = (k) => {
+    setWall(k);
+    setPock(k);
+    for (let m = 0; m < N; m++) {
+      if (m === k) continue;
+      if (k < m) setPair(k, m);
+      else setPair(m, k);
+    }
+  };
+  // body i pocketed → drop all its events (it no longer plays)
+  const clearBody = (i) => {
+    evWall[i] = null;
+    evPock[i] = null;
+    for (let m = 0; m < N; m++) {
+      if (m === i) continue;
+      evPair[i < m ? i * N + m : m * N + i] = null;
+    }
+  };
+
+  // initial full build (the only O(N^2) detection pass)
+  for (let i = 0; i < N; i++) {
+    setWall(i);
+    setPock(i);
+    for (let j = i + 1; j < N; j++) setPair(i, j);
+  }
+
   while (count < cap) {
     const horizon = bodies.reduce(
       (m, b) => (!b.pocketed && b.moving ? Math.max(m, b.stopTime()) : m),
@@ -90,6 +151,7 @@ export function runEngine(layout, shot, opts = {}) {
 
     let next = null;
     const consider = (ev) => {
+      if (!ev) return;
       if (!next) {
         next = ev;
         return;
@@ -104,18 +166,10 @@ export function runEngine(layout, shot, opts = {}) {
         }
       }
     };
-
-    for (let i = 0; i < bodies.length; i++) {
-      if (bodies[i].pocketed) continue;
-      const w = detectWall(bodies[i], bounds);
-      if (w) consider({ time: t + w.time, kind: 'wall', i, axis: w.axis });
-      const pk = detectPocket(bodies[i], pocketList);
-      if (pk) consider({ time: t + pk.time, kind: 'pocket', i, pocketIndex: pk.pocketIndex });
-      for (let j = i + 1; j < bodies.length; j++) {
-        if (bodies[j].pocketed) continue;
-        const tp = detectPair(bodies[i], bodies[j]);
-        if (tp < Infinity) consider({ time: t + tp, kind: 'pair', i, j });
-      }
+    for (let i = 0; i < N; i++) {
+      consider(evWall[i]);
+      consider(evPock[i]);
+      for (let j = i + 1; j < N; j++) consider(evPair[i * N + j]);
     }
 
     if (!next) {
@@ -135,11 +189,13 @@ export function runEngine(layout, shot, opts = {}) {
       const b = bodies[next.i];
       if (wantTimeline) intensity = Math.abs(next.axis === 'x' ? b.vel.x : b.vel.y); // incoming normal speed
       resolveWall(b, next.axis, BOARD.cushionRestitution, 1e-3, muWall);
+      recompute(next.i); // only this body's velocity changed
     } else if (next.kind === 'pocket') {
       const b = bodies[next.i];
       b.pocketed = true;
       b.vel = v.vec(0, 0);
       b.pocket = next.pocketIndex;
+      clearBody(next.i);
     } else {
       const a = bodies[next.i];
       const b = bodies[next.j];
@@ -148,6 +204,8 @@ export function runEngine(layout, shot, opts = {}) {
         intensity = Math.abs(v.dot(v.sub(a.vel, b.vel), n)); // closing speed along the contact normal
       }
       resolvePair(a, b, PUCK_RESTITUTION, muPair);
+      recompute(next.i); // both bodies' velocities changed
+      recompute(next.j);
     }
 
     if (wantTimeline) timeline.push(snap(bodies, t, next.kind, intensity));
